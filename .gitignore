@@ -1,0 +1,44 @@
+# ============================================================
+# .gitignore — Yelp AI Data Platform PoC
+# Keeps secrets, credentials, and ephemeral files out of
+# version control. Databricks Secrets is the primary vault;
+# this file is the safety net.
+# ============================================================
+
+# ----- Credentials & Secrets -----
+.env
+.env.*
+*.secret
+*.token
+credentials.json
+service_account.json
+
+# ----- Kaggle (new API token format: KGAT_*) -----
+.kaggle/
+kaggle.json
+access_token
+
+# ----- Python -----
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# ----- Jupyter / Databricks -----
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ----- OS files -----
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ----- IDE -----
+.idea/
+.vscode/
+*.code-workspace
