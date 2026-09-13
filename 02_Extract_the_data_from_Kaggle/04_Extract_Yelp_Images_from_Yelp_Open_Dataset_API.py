@@ -122,12 +122,13 @@ print(f"  Exists: {os.path.isdir(volume_path)}")
 
 # DBTITLE 1,Workaround & Next Steps
 # MAGIC %md
-# MAGIC ## Temporary Workaround (Manual Upload)
+# MAGIC ## Temporary Workaround (Local Upload Script)
 # MAGIC
-# MAGIC Since Yelp Open Dataset API access is not yet available, the following manual steps were taken:
+# MAGIC Since Yelp Open Dataset API access is not yet available, the following steps were taken:
 # MAGIC
 # MAGIC 1. **Downloaded locally** — The Yelp images dataset was downloaded directly from the [Yelp Open Dataset](https://www.yelp.com/dataset) website onto a local machine.
-# MAGIC 2. **Uploaded to Databricks** — The downloaded images were then manually uploaded into the folder created above: `/Volumes/yelp_poc_uc/bronze/landing_zone/yelp_images_dataset`.
-# MAGIC 3. **Proceeding with the project** — The rest of the pipeline (Bronze → Silver → Gold) will continue using the manually uploaded data. The automated extraction logic in this notebook will be completed once Yelp API access is obtained.
+# MAGIC 2. **Uploaded via script** — The images were packed into tar chunks and uploaded using `05_upload_yelp_images_to_volume_RUN_LOCALLY.py` (runs on the local machine).
+# MAGIC 3. **Extracted on Databricks** — The tar chunks were unpacked into `/Volumes/yelp_poc_uc/bronze/landing_zone/yelp_images_dataset` using notebook 06 (`06_Extract_Tar_Archives_into_Volume`).
+# MAGIC 4. **Proceeding with the project** — The rest of the pipeline (Bronze → Silver → Gold) will continue using the uploaded data. The automated extraction logic in this notebook will be completed once Yelp API access is obtained.
 # MAGIC
 # MAGIC > This notebook should be revisited and fully automated once Yelp Open Dataset API credentials are available.

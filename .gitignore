@@ -38,6 +38,11 @@ Thumbs.db
 *.swo
 *~
 
+# ----- Local Upload Script Artifacts -----
+upload_manifest.json
+.venv/
+_tar_chunks/
+
 # ----- IDE -----
 .idea/
 .vscode/
