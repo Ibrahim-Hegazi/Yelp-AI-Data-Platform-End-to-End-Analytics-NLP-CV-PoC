@@ -90,7 +90,7 @@ import os
 # Create the yelp_images_dataset folder inside the
 # Bronze landing_zone volume (active — no API needed)
 # --------------------------------------------------
-volume_path = "/Volumes/yelp_poc_uc/bronze/landing_zone/yelp_images_dataset"
+volume_path = "/Volumes/yelp_poc_uc/bronze_landing/landing_zone/yelp_images_dataset"
 os.makedirs(volume_path, exist_ok=True)
 
 print(f"Folder created: {volume_path}")
