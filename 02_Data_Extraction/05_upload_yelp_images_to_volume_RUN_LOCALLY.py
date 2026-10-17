@@ -1,3 +1,6 @@
+
+
+
 #!/usr/bin/env python3
 """
 Upload local Yelp image dataset to a Databricks Unity Catalog Volume.
@@ -11,10 +14,12 @@ Uploading 200K+ small files one-by-one via the Files API is bottlenecked
 by per-request HTTP overhead (~10-14 hours).  This script uses a much
 faster approach:
 
-1. Packs all images into tar archive CHUNKS locally (2 GB each).
+1. Packs all images into tar archive CHUNKS locally (50 MB each).
    - No compression (JPEGs don't compress), so this is very fast.
-2. Uploads just the handful of tar chunks to the UC Volume.
-   - ~5 API calls instead of 200,000 — cuts upload from hours to minutes.
+   - Small chunks are critical for slow/unstable connections.
+2. Uploads each chunk to the UC Volume with stall detection and retry.
+   - A watchdog thread detects frozen connections and aborts early.
+   - Catches ALL exception types (network, timeout, API, SSL).
 3. The tar chunks are then extracted on the Databricks side by running
    notebook 06 ("06_Extract_Tar_Archives_into_Volume").
 
@@ -24,10 +29,11 @@ WHAT THIS SCRIPT DOES
    externally-managed Python installs (Arch, Fedora 38+, Ubuntu 23.04+).
 2. Auto-installs missing Python dependencies (databricks-sdk, python-dotenv).
 3. Loads DATABRICKS_HOST and DATABRICKS_TOKEN from a .env file.
-4. Packs the local Yelp Photos folder into 2 GB tar chunks.
+4. Packs the local Yelp Photos folder into 50 MB tar chunks.
 5. Uploads each chunk via the Databricks Files API with retry logic.
-6. Tracks which chunks succeeded so re-runs skip already-uploaded chunks.
-7. Prints progress with transfer speed and ETA.
+6. A watchdog thread detects stalled connections and triggers early retry.
+7. Tracks which chunks succeeded so re-runs skip already-uploaded chunks.
+8. Logs everything (timestamped) to console AND upload.log file.
 
 AFTER THIS SCRIPT FINISHES
 ---------------------------
@@ -143,8 +149,12 @@ _ensure_packages()  # installs deps inside the venv
 # Imports (safe now that dependencies are guaranteed)
 # ---------------------------------------------------------------------------
 import json
+import logging
 import tarfile
+import threading
 import time
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 from databricks.sdk import WorkspaceClient
@@ -153,15 +163,33 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
+# Logging setup — timestamped console + persistent log file
+# ---------------------------------------------------------------------------
+LOG_PATH = Path(__file__).parent / "upload.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),                        # console
+        logging.FileHandler(LOG_PATH, mode="a"),        # persistent log file
+    ],
+)
+log = logging.getLogger("yelp_upload")
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 LOCAL_ROOT = "/home/ibrahimhegazi/Downloads/Yelp-Photos/Yelp Photos"
 VOLUME_ROOT = "/Volumes/yelp_poc_uc/bronze/landing_zone/yelp_images_dataset"
 TAR_DIR = Path(__file__).parent / "_tar_chunks"  # local staging for tar archives
 MANIFEST_PATH = Path(__file__).parent / "upload_manifest.json"
-CHUNK_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB per tar chunk (under 5 GB API limit)
-MAX_RETRIES = 5
-RETRY_BACKOFF_SECONDS = 10
+CHUNK_SIZE_BYTES = 50 * 1024 * 1024   # 50 MB per tar chunk — critical for slow connections
+MAX_RETRIES = 10                       # more retries for unreliable connections
+RETRY_BACKOFF_SECONDS = 5
+STALL_TIMEOUT_SECONDS = 120            # abort if no bytes move for 2 minutes
+HTTP_TIMEOUT_SECONDS = 900             # 15-min HTTP timeout (50 MB @ 10 MB/min = 5 min)
 
 
 # ---------------------------------------------------------------------------
@@ -172,10 +200,10 @@ def load_env():
     env_path = Path(__file__).parent / ".env"
     if env_path.exists():
         load_dotenv(env_path, override=True)
-        print(f"Loaded credentials from {env_path}")
+        log.info(f"Loaded credentials from {env_path}")
     else:
-        print(
-            f"WARNING: No .env file found at {env_path}\n"
+        log.warning(
+            f"No .env file found at {env_path}\n"
             f"  Create one with DATABRICKS_HOST and DATABRICKS_TOKEN,\n"
             f"  or set them as environment variables before running."
         )
@@ -232,8 +260,8 @@ def create_tar_chunks(local_root: str, tar_dir: Path, chunk_size: int) -> list:
     existing = sorted(tar_dir.glob("yelp_images_chunk_*.tar"))
     if existing:
         total_size = sum(f.stat().st_size for f in existing)
-        print(f"Reusing {len(existing)} existing tar chunk(s) ({format_size(total_size)} total)")
-        print(f"  Delete {tar_dir}/ to force re-packing.\n")
+        log.info(f"Reusing {len(existing)} existing tar chunk(s) ({format_size(total_size)} total)")
+        log.info(f"  Delete {tar_dir}/ to force re-packing.")
         return existing
 
     chunks = []
@@ -247,7 +275,7 @@ def create_tar_chunks(local_root: str, tar_dir: Path, chunk_size: int) -> list:
             full_path = os.path.join(dirpath, name)
             all_files.append(full_path)
 
-    print(f"Packing {len(all_files)} files into tar chunks ({format_size(chunk_size)} each)...")
+    log.info(f"Packing {len(all_files)} files into tar chunks ({format_size(chunk_size)} each)...")
 
     for i, full_path in enumerate(all_files, 1):
         file_size = os.path.getsize(full_path)
@@ -256,7 +284,7 @@ def create_tar_chunks(local_root: str, tar_dir: Path, chunk_size: int) -> list:
         if current_tar is None or (current_size + file_size > chunk_size and current_size > 0):
             if current_tar is not None:
                 current_tar.close()
-                print(f"  Chunk {chunk_idx}: {format_size(current_size)}")
+                log.info(f"  Chunk {chunk_idx}: {format_size(current_size)}")
             chunk_idx += 1
             chunk_path = tar_dir / f"yelp_images_chunk_{chunk_idx:03d}.tar"
             chunks.append(chunk_path)
@@ -269,33 +297,106 @@ def create_tar_chunks(local_root: str, tar_dir: Path, chunk_size: int) -> list:
         current_size += file_size
 
         if i % 10000 == 0:
-            print(f"  Packed {i}/{len(all_files)} files...")
+            log.info(f"  Packed {i}/{len(all_files)} files...")
 
     if current_tar is not None:
         current_tar.close()
-        print(f"  Chunk {chunk_idx}: {format_size(current_size)}")
+        log.info(f"  Chunk {chunk_idx}: {format_size(current_size)}")
 
-    print(f"\nCreated {len(chunks)} tar chunk(s).\n")
+    log.info(f"Created {len(chunks)} tar chunk(s).")
     return chunks
 
 
+class _StallError(Exception):
+    """Raised when an upload stalls (no bytes transferred for too long)."""
+
+
 class _ProgressFile:
-    """Wraps a binary file to show a tqdm progress bar as bytes are read."""
+    """Wraps a binary file with a progress bar AND stall detection.
+
+    A background watchdog thread checks every 10 s whether any new bytes
+    have been read.  If the transfer stalls for STALL_TIMEOUT_SECONDS the
+    watchdog sets an abort flag, causing the next read() to raise
+    _StallError so the upload can be retried immediately instead of
+    waiting for the OS TCP timeout (which can take several minutes of
+    apparent 'freeze').
+    """
 
     def __init__(self, fobj, total: int, desc: str):
         self._fobj = fobj
+        self._total = total
+        self._bytes_read = 0
+        self._last_progress_time = time.time()
+        self._last_progress_bytes = 0
+        self._abort = False
         self._bar = tqdm(
             total=total, unit="B", unit_scale=True, unit_divisor=1024,
             desc=desc, ncols=80, miniters=1,
         )
+        # Watchdog thread
+        self._stop_event = threading.Event()
+        self._watchdog = threading.Thread(target=self._watch, daemon=True)
+        self._watchdog.start()
+
+    def _watch(self):
+        """Background thread: detect stalls and log periodic speed."""
+        while not self._stop_event.wait(10):
+            now = time.time()
+            elapsed = now - self._last_progress_time
+            if self._bytes_read > self._last_progress_bytes:
+                # Progress is being made — log speed every 30 s
+                delta_bytes = self._bytes_read - self._last_progress_bytes
+                speed = delta_bytes / elapsed if elapsed > 0 else 0
+                pct = (self._bytes_read / self._total * 100) if self._total else 0
+                if elapsed >= 30:
+                    log.info(
+                        f"  progress: {format_size(self._bytes_read)}/{format_size(self._total)} "
+                        f"({pct:.0f}%) | {format_size(speed)}/s"
+                    )
+                    self._last_progress_time = now
+                    self._last_progress_bytes = self._bytes_read
+            else:
+                # No new bytes
+                if elapsed >= STALL_TIMEOUT_SECONDS:
+                    log.warning(
+                        f"  STALL DETECTED: no bytes transferred for {elapsed:.0f}s "
+                        f"(limit {STALL_TIMEOUT_SECONDS}s) — aborting to retry"
+                    )
+                    self._abort = True
+                    return
+                elif elapsed >= 30:
+                    log.warning(f"  no bytes transferred for {elapsed:.0f}s ...")
 
     def read(self, size=-1):
+        if self._abort:
+            raise _StallError(
+                f"Upload stalled: no data transferred for {STALL_TIMEOUT_SECONDS}s"
+            )
         data = self._fobj.read(size)
         if data:
+            self._bytes_read += len(data)
             self._bar.update(len(data))
         return data
 
+    def seekable(self):
+        return self._fobj.seekable()
+
+    def seek(self, offset, whence=0):
+        # Reset stall timer on seek (retry rewinds the file)
+        self._last_progress_time = time.time()
+        self._bytes_read = 0
+        self._last_progress_bytes = 0
+        self._abort = False
+        return self._fobj.seek(offset, whence)
+
+    def tell(self):
+        return self._fobj.tell()
+
+    def readable(self):
+        return self._fobj.readable()
+
     def close(self):
+        self._stop_event.set()
         self._bar.close()
         self._fobj.close()
 
@@ -307,24 +408,58 @@ class _ProgressFile:
 
 
 def upload_chunk(w: WorkspaceClient, local_path: Path, remote_path: str) -> bool:
-    """Upload a single tar chunk with retries and a real-time progress bar."""
+    """Upload a single tar chunk with retries, stall detection, and full logging."""
     file_size = local_path.stat().st_size
+    log.info(f"Starting upload: {local_path.name} ({format_size(file_size)})")
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
+            log.info(f"  attempt {attempt}/{MAX_RETRIES}")
             start = time.time()
             with _ProgressFile(open(local_path, "rb"), file_size, f"  {local_path.name}") as pf:
                 w.files.upload(remote_path, pf, overwrite=True)
             elapsed = time.time() - start
             speed = file_size / elapsed if elapsed > 0 else 0
-            print(f"  ✓ {local_path.name} uploaded in {format_time(elapsed)} ({format_size(speed)}/s)")
+            log.info(
+                f"  ✓ {local_path.name} uploaded in {format_time(elapsed)} "
+                f"({format_size(speed)}/s)"
+            )
             return True
+
+        except _StallError as e:
+            # Stall detected by watchdog — retry immediately (no long wait)
+            log.warning(f"  STALL on attempt {attempt}/{MAX_RETRIES}: {e}")
+            if attempt >= MAX_RETRIES:
+                log.error(f"  FAILED after {MAX_RETRIES} attempts (stalls): {local_path.name}")
+
         except DatabricksError as e:
             wait = RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
-            print(f"  retry {attempt}/{MAX_RETRIES} for {local_path.name}: {e} (waiting {wait}s)")
+            log.error(
+                f"  Databricks API error on attempt {attempt}/{MAX_RETRIES} "
+                f"for {local_path.name}: {type(e).__name__}: {e}"
+            )
             if attempt < MAX_RETRIES:
+                log.info(f"  waiting {wait}s before retry...")
                 time.sleep(wait)
             else:
-                print(f"  FAILED after {MAX_RETRIES} retries: {local_path.name}")
+                log.error(f"  FAILED after {MAX_RETRIES} retries: {local_path.name}")
+
+        except Exception as e:
+            # Catch ALL other exceptions: ConnectionError, Timeout, OSError,
+            # urllib3 errors, SSL errors, etc. — these were silently crashing before.
+            wait = RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            log.error(
+                f"  Network/system error on attempt {attempt}/{MAX_RETRIES} "
+                f"for {local_path.name}:\n"
+                f"    {type(e).__name__}: {e}\n"
+                f"    {traceback.format_exc().strip()}"
+            )
+            if attempt < MAX_RETRIES:
+                log.info(f"  waiting {wait}s before retry...")
+                time.sleep(wait)
+            else:
+                log.error(f"  FAILED after {MAX_RETRIES} retries: {local_path.name}")
+
     return False
 
 
@@ -340,8 +475,9 @@ def main():
         sys.exit(f"Local folder not found: {LOCAL_ROOT}")
 
     # --- Connect to Databricks ---
+    os.environ.setdefault("DATABRICKS_HTTP_TIMEOUT_SECONDS", str(HTTP_TIMEOUT_SECONDS))
     w = WorkspaceClient()
-    print(f"Connected to: {os.environ.get('DATABRICKS_HOST')}\n")
+    log.info(f"Connected to: {os.environ.get('DATABRICKS_HOST')}")
 
     # --- Step 1: Create tar chunks locally ---
     tar_chunks = create_tar_chunks(LOCAL_ROOT, TAR_DIR, CHUNK_SIZE_BYTES)
@@ -354,12 +490,12 @@ def main():
     start_time = time.time()
     total_bytes = 0
 
-    print(f"Uploading {len(tar_chunks)} tar chunk(s) to {VOLUME_ROOT}/...\n")
+    log.info(f"Uploading {len(tar_chunks)} tar chunk(s) to {VOLUME_ROOT}/...")
 
     for chunk_path in tar_chunks:
         chunk_name = chunk_path.name
         if chunk_name in uploaded:
-            print(f"  Skipping {chunk_name} (already uploaded)")
+            log.info(f"  Skipping {chunk_name} (already uploaded)")
             continue
 
         remote_path = f"{VOLUME_ROOT}/{chunk_name}"
@@ -373,7 +509,7 @@ def main():
     elapsed_total = time.time() - start_time
 
     # --- Step 3: Clean up local tar chunks (only successfully uploaded) ---
-    print("\nCleaning up local tar chunks...")
+    log.info("Cleaning up local tar chunks...")
     for chunk_path in tar_chunks:
         if chunk_path.exists() and chunk_path.name in uploaded:
             chunk_path.unlink()
@@ -381,30 +517,31 @@ def main():
     if TAR_DIR.exists() and not any(TAR_DIR.iterdir()):
         TAR_DIR.rmdir()
     if failed:
-        print(f"Kept {len(failed)} failed chunk(s) locally for retry.")
+        log.warning(f"Kept {len(failed)} failed chunk(s) locally for retry.")
     else:
-        print("All local tar chunks removed.")
+        log.info("All local tar chunks removed.")
         if MANIFEST_PATH.exists():
             MANIFEST_PATH.unlink()
 
     # --- Summary ---
-    print(f"\n{'=' * 60}")
-    print(f"UPLOAD COMPLETE")
-    print(f"{'=' * 60}")
-    print(f"  Chunks uploaded:  {len(uploaded)}/{len(tar_chunks)}")
-    print(f"  Data transferred: {format_size(total_bytes)}")
-    print(f"  Time elapsed:     {format_time(elapsed_total)}")
+    log.info(f"{'=' * 60}")
+    log.info(f"UPLOAD COMPLETE")
+    log.info(f"{'=' * 60}")
+    log.info(f"  Chunks uploaded:  {len(uploaded)}/{len(tar_chunks)}")
+    log.info(f"  Data transferred: {format_size(total_bytes)}")
+    log.info(f"  Time elapsed:     {format_time(elapsed_total)}")
     if total_bytes > 0 and elapsed_total > 0:
-        print(f"  Avg speed:        {format_size(total_bytes / elapsed_total)}/s")
+        log.info(f"  Avg speed:        {format_size(total_bytes / elapsed_total)}/s")
     if failed:
-        print(f"\n  {len(failed)} chunk(s) FAILED:")
+        log.error(f"  {len(failed)} chunk(s) FAILED:")
         for f in failed:
-            print(f"    - {f}")
-        print("  Re-run this script to retry failed chunks.")
+            log.error(f"    - {f}")
+        log.info("  Re-run this script to retry failed chunks.")
     else:
-        print(f"\n  All chunks uploaded successfully.")
-        print(f"  NEXT STEP: Run notebook 06 (06_Extract_Tar_Archives_into_Volume)")
-        print(f"  in Databricks to unpack images into the volume.")
+        log.info(f"  All chunks uploaded successfully.")
+        log.info(f"  NEXT STEP: Run notebook 06 (06_Extract_Tar_Archives_into_Volume)")
+        log.info(f"  in Databricks to unpack images into the volume.")
+    log.info(f"  Full log saved to: {LOG_PATH}")
 
 
 if __name__ == "__main__":
