@@ -10,11 +10,17 @@
 
 ## Pipeline Context
 
-| Property | Value |
-| --- | --- |
-| Notebooks Executed **Before** (Upstream) | `01_Landing_to_Staging_Schema_Validator` — Validates JSON schema consistency and splits rows into clean/error Delta tables in `bronze_staging`. |
-| | `02_Staging_Quality_Gate_and_Promotion` — Reviews error tables, reports quality summary, and promotes clean tables to `bronze_final`. |
-| Notebooks Executed **After** (Downstream) | `04_Bronze_Data_Profiling_and_EDA/4.1_Basic_Data_Profiling` — Basic data profiling of the promoted `bronze_final` tables. |
+This report was produced during the **Schema Validation & Staging** step of the Yelp PoC pipeline. The table below traces the full data lineage, showing which notebooks produced each stage and where the data lands in Unity Catalog.
+
+| Step | Notebook | UC Location | Layer |
+| ---: | --- | --- | --- |
+| 1 | `03_Extract_Yelp_Dataset_from_Kaggle` | `/Volumes/yelp_poc_uc/bronze_landing/landing_zone/yelp_textual_dataset/` | Landing Zone |
+| **2** | **`01_Landing_to_Staging_Schema_Validator`** | **`yelp_poc_uc.bronze_staging`** (`yelp_user_clean` / `yelp_user_errors`) | **◄ YOU ARE HERE — Schema Validation & Staging** |
+| 3 | `02_Staging_Quality_Gate_and_Promotion` | `yelp_poc_uc.bronze_final.yelp_user` | Bronze Final |
+| 4 | `4.1.5_User_Basic_Profile` | _(reads `bronze_final.yelp_user`)_ | Basic EDA |
+| 5 | `4.2.5_User_Deep_EDA` _(planned)_ | _(reads `bronze_final.yelp_user`)_ | Deep EDA / DQ Assessment |
+| 6 | Silver Transformation _(planned)_ | `yelp_poc_uc.silver` _(planned)_ | Silver |
+| 7 | Gold Aggregation _(planned)_ | `yelp_poc_uc.gold` _(planned)_ | Gold |
 
 ---
 

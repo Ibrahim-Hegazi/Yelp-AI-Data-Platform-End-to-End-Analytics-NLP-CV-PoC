@@ -28,10 +28,17 @@ This Schema Specification Document describes the **Bronze Landing** layer of the
 
 ## 2. Pipeline Context
 
-| Property | Value |
-| --- | --- |
-| Notebook Executed **Before** (Upstream) | `03_Extract_Yelp_Dataset_from_Kaggle` — Downloads the raw Yelp academic dataset from Kaggle and lands JSON files into the volume. |
-| Notebook Executed **After** (Downstream) | `01_Landing_to_Staging_Schema_Validator` — Reads raw JSON files, applies schema validation, and writes clean/error rows into `bronze_staging`. |
+This document describes the raw data in the **Landing Zone** of the Yelp PoC pipeline. The table below traces the full data lineage, showing which notebooks produced each stage and where the data lands in Unity Catalog.
+
+| Step | Notebook | UC Location | Layer |
+| ---: | --- | --- | --- |
+| **1** | **`03_Extract_Yelp_Dataset_from_Kaggle`** | **`/Volumes/yelp_poc_uc/bronze_landing/landing_zone/yelp_textual_dataset/`** | **◄ YOU ARE HERE — Landing Zone** |
+| 2 | `01_Landing_to_Staging_Schema_Validator` | `yelp_poc_uc.bronze_staging` (`*_clean` / `*_errors` per dataset) | Bronze Staging |
+| 3 | `02_Staging_Quality_Gate_and_Promotion` | `yelp_poc_uc.bronze_final` (5 tables) | Bronze Final |
+| 4 | `4.1.*_<Dataset>_Basic_Profile` | _(reads `bronze_final.*`)_ | Basic EDA |
+| 5 | `4.2.*_<Dataset>_Deep_EDA` | _(reads `bronze_final.*`)_ | Deep EDA / DQ Assessment |
+| 6 | Silver Transformation _(planned)_ | `yelp_poc_uc.silver` _(planned)_ | Silver |
+| 7 | Gold Aggregation _(planned)_ | `yelp_poc_uc.gold` _(planned)_ | Gold |
 
 ---
 

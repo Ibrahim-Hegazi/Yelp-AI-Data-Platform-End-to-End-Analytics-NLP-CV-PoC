@@ -32,17 +32,19 @@ This document catalogues every data quality issue discovered during the Deep Exp
 
 ## 2. Pipeline Context
 
-This table sits in the **Bronze Final** layer of the Yelp PoC pipeline:
+This table sits in the **Bronze Final** layer of the Yelp PoC pipeline. The table below traces the full data lineage from raw extraction through to the planned Gold layer, showing which notebooks produced each stage and where the data lands in Unity Catalog.
 
-```
-Landing Zone (raw JSON)
-  └─► bronze_staging (schema-validated clean/error split)
-        └─► bronze_final.yelp_review  ◄── YOU ARE HERE
-              └─► silver (cleaned, typed, enriched, modeled)
-                    └─► gold (aggregated, feature-engineered)
-```
+| Step | Notebook | UC Location | Layer |
+| ---: | --- | --- | --- |
+| 1 | `03_Extract_Yelp_Dataset_from_Kaggle` | `/Volumes/yelp_poc_uc/bronze_landing/landing_zone/yelp_textual_dataset/` | Landing Zone |
+| 2 | `01_Landing_to_Staging_Schema_Validator` | `yelp_poc_uc.bronze_staging` (`yelp_checkin_clean` / `yelp_checkin_errors`) | Bronze Staging |
+| 3 | `02_Staging_Quality_Gate_and_Promotion` | `yelp_poc_uc.bronze_final.yelp_checkin` | Bronze Final |
+| 4 | `4.1.2_Checkin_Basic_Profile` | _(reads `bronze_final.yelp_checkin`)_ | Basic EDA |
+| **5** | **`4.2.2_Checkin_Deep_EDA`** | _(reads `bronze_final.yelp_checkin`)_ | **◄ YOU ARE HERE — Deep EDA / DQ Assessment** |
+| 6 | Silver Transformation _(planned)_ | `yelp_poc_uc.silver` _(planned)_ | Silver |
+| 7 | Gold Aggregation _(planned)_ | `yelp_poc_uc.gold` _(planned)_ | Gold |
 
-The DQ findings documented below were discovered during the Bronze-layer profiling phase. All remediations marked as **"Chosen"** will be applied during the **Bronze → Silver** transformation step.
+The DQ findings documented below were discovered during the Deep EDA phase (Step 5). All remediations marked as **"Chosen"** will be applied during the **Bronze → Silver** transformation step (Step 6).
 
 ---
 
