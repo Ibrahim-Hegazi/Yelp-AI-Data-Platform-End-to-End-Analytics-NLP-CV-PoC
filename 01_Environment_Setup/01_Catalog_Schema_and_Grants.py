@@ -54,8 +54,12 @@ CATALOGS = [
             {"name": "bronze_landing", "comment": "Raw ingested data landing zone — stores untouched source files as-is before any processing"},
             {"name": "bronze_staging", "comment": "Schema-validated data — clean and error rows separated as managed Delta tables for review and remediation"},
             {"name": "bronze_final",   "comment": "Reconciled bronze data — clean and remediated rows combined into final Delta tables ready for Silver enrichment"},
-            {"name": "Silver",         "comment": "Cleansed and enriched data with applied business rules and quality checks"},
-            {"name": "Gold",           "comment": "Curated analytics-ready tables optimised for reporting and ML consumption"},
+            {"name": "Silver",            "comment": "Cleansed and enriched data with applied business rules and quality checks (ALSO A STAGING GROUND FOR TESTING OUR CLEANING PROCESSES)"},
+            {"name": "Silver_Cleaned",    "comment": "Bare-minimum schema changes — nested data expanded, integrity checks enforced, correct data types applied, and important DQ issues from deep EDA fixed"},
+            {"name": "Silver_Normalized",  "comment": "Normalization rules enforced from 1NF through BCNF on the cleaned Silver data"},
+            {"name": "Silver_Partitioned", "comment": "Normalized data partitioned to mimic incremental load patterns"},
+            {"name": "Gold",               "comment": "Curated analytics-ready tables optimised for reporting and ML consumption"},
+            {"name": "quarantine" , "comment": 'Quarantine zone — rows removed during cleaning, preserved for audit and recovery'}
         ],
         "volumes": [
             {"schema": "bronze_landing", "name": "landing_zone", "comment": "Volume for storing initial raw data extracted from main Yelp data sources"},
@@ -412,3 +416,6 @@ print("Groups have been granted their configured privileges.")
 print("\nTo add a new project:")
 print("  1. Add a new catalog block to the CATALOGS list in the config cell")
 print("  2. Re-run this notebook")
+
+# COMMAND ----------
+

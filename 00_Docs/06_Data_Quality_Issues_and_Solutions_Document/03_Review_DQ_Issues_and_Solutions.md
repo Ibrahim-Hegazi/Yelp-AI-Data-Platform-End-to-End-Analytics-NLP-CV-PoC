@@ -224,6 +224,39 @@ The DQ findings documented below were discovered during the Deep EDA phase (Step
 
 **Best Logical Solution:** **Option 2 — Exclude during NLP preprocessing at the Silver layer.** These 156 rows are not data errors; they are legitimate but low-information reviews. Minimum token/character filters are a standard NLP preprocessing step and should be applied where text analysis occurs, not at the Bronze/discovery stage.
 
+##### 🔍 Root Cause Analysis (Cell 42)
+
+A detailed RCA was performed to classify each of the 156 short reviews as **noise (useless for ML)** vs **genuine content (potentially useful)**.
+
+**Classification Method:** Each review's text was stripped of non-alphanumeric characters (`[a-zA-Z0-9]`). If the result was empty → PUNCTUATION_ONLY; if original trimmed length was 1 char → SINGLE_CHAR; otherwise → MICRO_REVIEW.
+
+**Results:**
+
+| Category | Count | Avg Stars | ML Verdict |
+| --- | ---: | ---: | --- |
+| MICRO_REVIEW (genuine short text) | 110 | 3.31 | ⚠️ Task-dependent |
+| PUNCTUATION_ONLY (no semantic content) | 30 | 2.37 | ❌ Remove |
+| SINGLE_CHAR (lone letters) | 16 | 2.56 | ❌ Remove |
+
+**Key Findings:**
+
+- **44 true noise records** (28 punctuation strings + 16 single letters) carry zero semantic value — safe to remove for all ML tasks.
+  - Punctuation noise: `.` ×9, `..` ×4, `...` ×5, `......` ×1, `.......` ×1, `........` ×1, `*` ×1, `-----` ×1, `:)` ×2, `:(` ×1, `!!` ×2
+  - Single-char noise: `Y` ×2, `N` ×2, `O` ×2, `H` ×2, `K` ×2, `S`, `X`, `M`, `L`, `Q`, `D` (1 each)
+  - ⚠️ 2 of the 30 "punctuation-only" reviews are genuine **Chinese-language reviews** (`沸腾水煮鱼` = "boiling water fish", `饺子还不错` = "dumplings are not bad") misclassified by the ASCII-only regex. These are genuine 4-star food reviews and should be **retained**.
+- **110 micro-reviews** contain real words with identifiable sentiment or business signals:
+  - **Business closure indicators** (13): `Closed` ×4, `closed` ×4, `Closed.` ×2, `Closed?`, `Closed :(`, `closed.` — valuable for operational intelligence
+  - **Positive sentiment** (~55): `Great` ×3, `Great!` ×2, `Awesome` ×3, `Good food` ×3, `Yum` ×3, `Awesome!`, `Wow!`, `Amazing!`, `Excellent`, `Love it!`, `Loved it!`, `the best.`, `Heaven.`, `So good!`, `Solid.`, `Fresh!`, `Thank you`, `So money!`, `Muy bueno`, `BLT!!!`, `stop by!`, `NOM :)`, etc.
+  - **Negative sentiment** (~13): `Nope.`, `No!`, `Boo`, `Booo`, `Boooo`, `Awful`, `Horrible!`, `Not happy`, `Sorry bad`, `Dont go`, `pure scum`, `no Bueno`, `No`
+  - **Neutral / ambiguous** (~15): `Meh...`, `meh...`, `So-so.`, `Blah.`, `Eh.`, `typical`, `Au jus`, `Wendy's`, `Nancy L`, `For ortho`, `Salut`, `fun af`, etc.
+  - **Meta / placeholder-like** (~14): `Edited` ×2, `Removed`, `Tbd`, `Hhjjgfhh`, `Lll` ×3, `Ii`, `:-D`, `Update`, `See below`, `"Yo`, `Thanks` — some arguably noise (~9 records)
+- **Engagement:** 60 of 156 (38.5%) received ≥ 1 community vote, suggesting community recognition even of ultra-short reviews.
+- **Star skew:** 1-star heavily over-represented (31.4% vs 15.3% overall), indicating short reviews correlate with negative experiences.
+- **Temporal concentration:** 2013–2015 accounts for 50.6% of all short reviews; near-zero after 2018.
+- **Repeat users:** 8 users posted multiple short reviews; top offender posted 5.
+
+**Refined Recommendation:** Remove 44 true-noise records (punctuation + single chars, excluding 2 Chinese reviews). For the 110 micro-reviews, retain for sentiment analysis but flag with `is_short_review = True` for selective exclusion from topic modelling, text embedding, and summarisation pipelines. Consider also reclassifying ~9 meta/placeholder-like micro-reviews (`Tbd`, `Hhjjgfhh`, `Edited`, `Removed`, `Lll` ×3, `Ii`, `:-D`) as noise.
+
 ##### 🔧 Chosen Cleaning Approach (Post Human Review)
 
 | Attribute | Detail |
@@ -586,11 +619,11 @@ This non-destructive approach preserves the full review history (valuable for NL
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | _TBD — pending human review_ |
+| **Chosen Solution** | **Option 2 — Add `is_latest_review` boolean flag** (Slowly Changing Dimension pattern). Users revise their reviews over time; only the latest version represents the current state. The flag enables `WHERE is_latest_review = TRUE` for current-state analytics while preserving the full review history for temporal/NLP analysis. |
 | **Implementation Layer** | Silver |
-| **Reviewer** | — |
-| **Review Date** | — |
-| **Notes** | — |
+| **Reviewer** | Ibrahim Mohamed |
+| **Review Date** | 2026-10-20 |
+| **Notes** | **RCA confirmed:** 89.3% of multi-review pairs have exactly 2 versions (single-edit pattern), median gap of 160 days, 41.7% changed their star rating. This is a dataset design characteristic (retained historical edits), not a defect. Implemented as `ROW_NUMBER() OVER (PARTITION BY user_id, business_id ORDER BY review_timestamp DESC, review_id DESC) = 1`. |
 
 
 ---
@@ -681,10 +714,10 @@ With only 5 rows affected and the sentinel meaning of -1 being functionally equi
 | Attribute | Detail |
 | --- | --- |
 | **Error ID** | `DQ-REVIEW-017` |
-| **Description** | **1 review** has an identical value for both `user_id` and `business_id` (`lJzfEleeQ1uYnYQp37LD9Q`). In Yelp's data model, user identifiers and business identifiers occupy distinct namespaces — a user’s 22-char hash should never equal a business’s 22-char hash under normal circumstances. This collision means either (a) a hash-generation defect mapped two different entities to the same key, (b) the record is a synthetic/test row that was not scrubbed before the academic dataset release, or (c) a data export artifact merged two ID columns. |
+| **Description** | **1 review row** has an identical value for both `user_id` and `business_id` (`lJzfEleeQ1uYnYQp37LD9Q`), creating a self-referential record. Additionally, **RCA revealed 3,204 distinct IDs** that appear in both the `user_id` and `business_id` columns across the dataset (cross-namespace hash collisions), affecting 13,506 review rows as users and 149,818 as businesses. **Root Cause (confirmed via RCA):** The collision ID exists in **both** `yelp_user` (user "Karen", yelping since 2011) and `yelp_business` ("Dollar Car Rental", Nashville TN). The review text ("DO NOT RENT FROM THESE COMPANIES") matches the car rental business, confirming a genuine hash collision — not a test record or export artifact. |
 | **Detection Phase** | Phase 6.6 → **6.6.3) Logical Contradiction Detection** (Part A: Review Domain Contradictions) |
 | **Detected In** | Cell 76: `6.6.3) Logical Contradiction Detection` |
-| **Severity** | 🟠 **Medium** — only 1 row (0.00001% of 6,990,280), but the violation is semantically severe: any join, grouping, or aggregation that pivots on `user_id` or `business_id` independently will conflate this user with this business, producing incorrect user-level and business-level metrics |
+| **Severity** | 🟠 **Medium** — the self-referential row (1 row, 0.00001%) is semantically severe for dedup and graph analytics. The broader 3,204 cross-namespace collisions don’t break standard joins (each row’s FK resolves correctly) but create ambiguity in entity resolution and graph analysis. |
 | **Affected Record** | `review_id = YwEHOUJF51lMefLLD_DO6w`, `user_id = business_id = lJzfEleeQ1uYnYQp37LD9Q`, `stars = 1`, `useful = 0`, `funny = 0`, `cool = 0`, `date = 2021-07-19 17:44:12` |
 | **Pattern** | The review is a **1-star review with zero engagement** (no useful, funny, or cool votes) posted in July 2021. The absence of any community interaction and the ID collision together suggest this may be a test or system-generated record rather than a genuine user review. |
 | **Impact** | **(1)** User-level aggregations (e.g., average stars per user, reviews per user) will include a business entity as if it were a user. **(2)** Business-level aggregations will include a user entity as if it were a business. **(3)** FK joins from review → yelp_user and review → yelp_business may both succeed for this row, creating a spurious link. **(4)** Any deduplication logic keyed on `(user_id, business_id)` will treat this as a self-referential record. |
@@ -706,11 +739,11 @@ With only 5 rows affected and the sentinel meaning of -1 being functionally equi
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | _TBD — pending human review_ |
+| **Chosen Solution** | **Quarantine self-referential rows** (`user_id == business_id`) to `yelp_poc_uc.quarantine.yelp_review_id_collision`. The 3,204 broader cross-namespace collisions are documented as a known pattern but not quarantined, since each individual row’s FK joins resolve correctly. |
 | **Implementation Layer** | Silver |
-| **Reviewer** | — |
-| **Review Date** | — |
-| **Notes** | — |
+| **Reviewer** | Ibrahim Mohamed |
+| **Review Date** | 2026-10-20 |
+| **Notes** | **RCA confirmed:** ID `lJzfEleeQ1uYnYQp37LD9Q` exists in both `yelp_user` (Karen) and `yelp_business` (Dollar Car Rental). Standard joins work fine for both; the quarantine targets only the self-referential row where dedup/graph logic would break. Broader namespace collisions (3,204 IDs) are documented as a known pattern but require no action — each row's FK joins resolve correctly. No flag column added. |
 
 
 ---
@@ -766,7 +799,7 @@ With only 5 rows affected and the sentinel meaning of -1 being functionally equi
 | **Detected In** | Cell 84: `6.7.1) FK Validity` |
 | **Severity** | 🟠 **Medium** — only 33 rows (0.00047% of 6,990,280), but any FK violation means these reviews cannot be joined to user metadata (yelping_since, elite status, friend network, compliments). User-level aggregations will silently exclude these 32 users if using INNER JOIN, or produce NULLs if using LEFT JOIN. |
 | **Affected Records** | 32 distinct `user_id`s including: `G0PWeUgNeGDobntevJlJ1g`, `0oMk8hhMqiSt4G1BJjjG6g`, `3N6-acEgosQSbipmBZKoSg`, `qH_QwXBgA4Z7WyCjtwRi2A`, `lzpM_Vf2rKA4ivGtAIOH4w`, `tquAg8GqbhN5k6Hkd23M0A`, `u8cq-5zzD7dPSa3LR8rIMw`, `5iBVQ3OeK8lV4Z_4PXc1Xw`, `5-L9Oo6PyUiBjeqj1GsJyQ`, `OxvEeexqWWeWkPwkKtTy2Q` (10 of 32 shown). |
-| **Root Cause** | Likely users who were deleted, suspended, or merged after their reviews were posted. The Yelp academic dataset is a static export; user deletions that occurred between the user-table snapshot and the review-table snapshot would create orphans. |
+| **Root Cause** | **RCA confirmed: Snapshot timing gap.** All 33 orphan reviews were posted on the **exact same date (2022-01-19)** within a ~2.3-hour window (17:22–19:43), at the dataset’s temporal boundary. The `yelp_user` table was exported before these 32 accounts were captured. Evidence: 100% zero engagement, complete absence from all other tables (`yelp_tip`, `yelp_checkin`), all 32 business_ids are valid, and both tables were loaded via single CTAS operations 23 seconds apart — confirming this is a source-level Yelp export gap, not a pipeline ingestion issue. |
 | **Impact** | **(1)** INNER JOINs between review and yelp_user will silently drop 33 rows. **(2)** Any user-level feature engineering (e.g., user tenure, elite status, friend count) will be NULL for these reviews. **(3)** Deduplication or user-cohort analyses will miss these users entirely. |
 
 ##### Suggested Solutions
@@ -783,11 +816,11 @@ With only 5 rows affected and the sentinel meaning of -1 being functionally equi
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | _TBD — pending human review_ |
+| **Chosen Solution** | **Solution 2 — Quarantine the 33 orphan-user rows** to `yelp_poc_uc.quarantine.yelp_review_orphan_user`. Users without a reference in `yelp_user_clean` are excluded from Silver since user-level features (tenure, elite status, friends) are unavailable and INNER JOINs would silently drop them. |
 | **Implementation Layer** | Silver |
-| **Reviewer** | — |
-| **Review Date** | — |
-| **Notes** | — |
+| **Reviewer** | Ibrahim Mohamed |
+| **Review Date** | 2026-10-20 |
+| **Notes** | **RCA confirmed:** All 33 reviews on the exact same date (2022-01-19) at the dataset boundary. 100% zero engagement. All business_ids valid. Pipeline tracing confirmed 0 errors in staging — these users were never in the source JSON file. Source-level Yelp export timing gap, not a pipeline issue. |
 
 
 ---

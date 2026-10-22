@@ -3,8 +3,8 @@
 > **Layer:** Bronze Final  
 > **Catalog:** `yelp_poc_uc`  
 > **Schema:** `bronze_final`  
-> **Document Version:** 1.0  
-> **Last Updated:** 2026-10-17  
+> **Document Version:** 1.1  
+> **Last Updated:** 2026-10-19  
 
 ---
 
@@ -41,10 +41,13 @@ This table sits in the **Bronze Final** layer of the Yelp PoC pipeline. The tabl
 | 3 | `02_Staging_Quality_Gate_and_Promotion` | `yelp_poc_uc.bronze_final.yelp_checkin` | Bronze Final |
 | 4 | `4.1.2_Checkin_Basic_Profile` | _(reads `bronze_final.yelp_checkin`)_ | Basic EDA |
 | **5** | **`4.2.2_Checkin_Deep_EDA`** | _(reads `bronze_final.yelp_checkin`)_ | **◄ YOU ARE HERE — Deep EDA / DQ Assessment** |
-| 6 | Silver Transformation _(planned)_ | `yelp_poc_uc.silver` _(planned)_ | Silver |
+| 6a | `01_Business_Silver_Cleaned` (DDL) | `yelp_poc_uc.silver_cleaned.yelp_business` (schema) | Silver Cleaned DDL |
+| 6b | `01_Business_Cleaning` | `yelp_poc_uc.silver_cleaned.yelp_business` (data) | Silver Cleaned |
+| 6c | `02_Checkin_Silver_Cleaned` (DDL) | `yelp_poc_uc.silver_cleaned.yelp_checkin` (schema) | Silver Cleaned DDL |
+| 6d | `02_Checkin_Cleaning` | `yelp_poc_uc.silver_cleaned.yelp_checkin` (data) | Silver Cleaned |
 | 7 | Gold Aggregation _(planned)_ | `yelp_poc_uc.gold` _(planned)_ | Gold |
 
-The DQ findings documented below were discovered during the Deep EDA phase (Step 5). All remediations marked as **"Chosen"** will be applied during the **Bronze → Silver** transformation step (Step 6).
+The DQ findings documented below were discovered during the Deep EDA phase (Step 5). All remediations marked as **"Chosen"** are applied during the **Bronze → Silver Cleaned** transformation (Steps 6a–6d). DDL queries create empty table structures; cleaning notebooks populate them.
 
 ---
 
@@ -73,7 +76,7 @@ The DQ findings documented below were discovered during the Deep EDA phase (Step
 
 The checkin data is fundamentally event-level (each timestamp = one checkin event), so the natural grain is one row per checkin, not one row per business. Exploding at the Silver layer creates a clean, analytics-ready model that eliminates repeated parsing logic, enables proper temporal joins, and allows standard SQL aggregations (`COUNT`, `GROUP BY date`, time-series analysis) without custom UDFs. The temporary fix in cells TE.1 and TE.2 already validates this approach.
 
-> **🔧 Chosen Resolution (Post-Human Review):** **Solution 2** — Explode the comma-separated `date` string into individual rows at the Silver layer, yielding one row per checkin event with a native `TimestampType` column. This becomes the canonical checkin grain for all downstream analytics.
+> **🔧 Chosen Resolution (Post-Human Review):** **Solution 2** — Explode the comma-separated `date` string into individual rows at the Silver Cleaned layer, yielding one row per checkin event with a native `TimestampType` column. Combined with `GROUP BY (business_id, checkin_timestamp)` + `COUNT(*)` → `checkin_count` to aggregate any duplicate timestamps into a counter column (see DQ-CHECKIN-005). This becomes the canonical checkin grain for all downstream analytics.
 
 ---
 
@@ -103,7 +106,7 @@ The checkin data is fundamentally event-level (each timestamp = one checkin even
 
 The Bronze table's `date` field is a denormalized multi-value string that violates First Normal Form (1NF). Exploding creates a proper event-level model with a native `TimestampType`, enabling standard temporal analysis without custom parsing. The 92.7% multi-value rate confirms this is not an edge case — it is the dominant data pattern and demands a structural fix, not a workaround. The temporary fix in cells TE.1 and TE.2 already proves this approach works correctly on this dataset.
 
-> **🔧 Chosen Resolution (Post-Human Review):** **Solution 2** — Apply `split()` → `explode()` → `to_timestamp()` at the Silver layer to normalize the packed multi-value string into proper 1NF event-level rows. (Same implementation as DQ-CHECKIN-001 — shared root cause.)
+> **🔧 Chosen Resolution (Post-Human Review):** **Solution 2** — Apply `split()` → `explode()` → `to_timestamp()` at the Silver Cleaned layer to normalize the packed multi-value string into proper 1NF event-level rows. After normalization, `GROUP BY (business_id, checkin_timestamp)` + `COUNT(*)` produces the `checkin_count` column, aggregating any duplicate timestamps into a counter (see DQ-CHECKIN-005). Same pipeline as DQ-CHECKIN-001 — shared root cause.
 
 ---
 #### 🟡 DQ-CHECKIN-003 — Expected Schema Drift After Temporary Remodeling
@@ -197,7 +200,7 @@ The drift detected here is exactly the transformation the cleaning pipeline shou
 
 Deduplication is necessary since exact duplicates carry zero informational value and inflate all downstream metrics. Solution 2 combines the simplicity of `dropDuplicates` with the governance benefit of an audit table. The quarantine table enables root-cause analysis (e.g., identifying whether duplicates correlate with specific businesses, time periods, or ingestion batches) and provides documentation for data quality reporting. Long-term, the root cause should also be addressed upstream (Solution 3), but the Silver-layer dedup provides immediate correction without Bronze schema changes.
 
-> **🔧 Resolution:** *Deferred to updated DQ-CHECKIN-005 (post-RCA) below.*
+> **🔧 Resolution:** *Superseded — see updated DQ-CHECKIN-005 (post-RCA) below. The final chosen approach uses `GROUP BY` + `COUNT(*)` → `checkin_count` counter column instead of deduplication + quarantine.*
 
 
 ---
@@ -228,21 +231,46 @@ Deduplication is necessary since exact duplicates carry zero informational value
 
 > All 3,543 duplicate timestamps were **already present** in the original comma-separated `date` strings in the Bronze table. The `split()` → `cast("array<timestamp>")` → `explode()` transformation **did not introduce any duplicates**. Timestamp casting **did not collapse** distinct strings into identical timestamps. The Yelp source platform recorded some checkin timestamps multiple times per business, embedding them as repeated entries in the comma-separated string.
 
+##### ⚠️ Alternative Interpretation — Assumptions & Caveats
+
+> **Important:** The RCA above confirmed the **origin** of the duplicates (source data), but it cannot definitively confirm their **intent**. The checkin dataset contains **no `user_id` column**, making it impossible to distinguish between two competing interpretations:
+
+| Interpretation | Implication |
+| --- | --- |
+| **A) Source error** — the Yelp platform erroneously recorded the same checkin event multiple times in the comma-separated string | Duplicates are noise → deduplication is correct |
+| **B) Genuine concurrent activity** — multiple distinct users checked in at the same business at the exact same second (e.g., a group arriving together, a venue with multiple counters/cashiers processing simultaneous checkins, or a popular location where several people tap "check in" at the same moment) | Duplicates carry real signal → deduplication destroys valid data |
+
+**Evidence that supports Interpretation B:**
+- The **DQ-CHECKIN-006 RCA** already proved that checkins **1–60 seconds apart** at the same business are genuine concurrent user activity (smooth Poisson decay, dinner-hour peaks, r=0.78 popularity correlation). If 1-second-apart checkins are real, there is no physical reason why **0-second-apart** checkins cannot also be real — the boundary between "genuine" and "error" at exactly 0 seconds is arbitrary.
+- Businesses with high foot traffic (restaurants with multiple cashiers, event venues, bars during peak hours) can realistically produce multiple simultaneous checkins at second-level granularity.
+- The dominant pattern is **2× repetition** (3,463 of 3,499 key groups) — consistent with two people checking in simultaneously.
+
+**Evidence that favors Interpretation A:**
+- The worst offender (`A5ZOxjJUE3wyRFO_Xy92xw`) has a 13.3% duplicate rate (112/842) — high for a business averaging ~1.25 checkins/week, though explainable if checkins cluster on busy nights.
+- A small number of keys repeat 4–5× — 4 or 5 people tapping "check in" at the *exact same second* is possible but increasingly unlikely for a mobile-app action.
+
+**Decision:** Rather than choosing between the two interpretations, the aggregation approach (Solution 4 — `GROUP BY` + `COUNT(*)` → `checkin_count`) preserves both signals: a `checkin_count` of 1 indicates a unique event, while count > 1 captures either source duplicates (Interpretation A) or genuine concurrent activity (Interpretation B). No data is discarded, and downstream consumers can interpret the counter according to their analytical context. The 0.027% affected volume means the analytical impact is negligible under either interpretation.
+
 ---
 
-##### 💡 Suggested Solutions *(unchanged — confirmed appropriate by RCA)*
+##### 💡 Suggested Solutions *(updated post-RCA — aggregation approach replaces quarantine)*
 
 | # | Solution | Justification |
 | --- | --- | --- |
-| 1 | **`dropDuplicates(["business_id", "checkin_timestamp_ISO_8601"])` at Silver layer** | Simple and deterministic. Since all columns are functionally determined by the composite key, no information is lost. **Limitation:** no audit trail. |
-| 2 | **Dedup with audit: keep first occurrence + log duplicates to a quarantine table** | Same deduplication + writes 3,543 dropped rows to `yelp_checkin_duplicates` for post-pipeline audit and root-cause investigation. Provides traceability for data governance. |
-| 3 | **Deduplicate at Bronze ingestion: apply `array_distinct()` on the split timestamps before writing** | Addresses the root cause at ingestion time. A `split → array_distinct → join` step in the Bronze layer prevents duplicates from entering the pipeline. Requires Bronze schema migration. |
+| 1 | **`dropDuplicates(["business_id", "checkin_timestamp_ISO_8601"])` at Silver layer** | Simple and deterministic. Since all columns are functionally determined by the composite key, no information is lost. **Limitation:** no audit trail, silently discards the duplicate signal. |
+| 2 | **Dedup with audit: keep first occurrence + log duplicates to a quarantine table** | Same deduplication + writes 3,543 dropped rows to a quarantine table for audit. Provides traceability but adds a second table to maintain. |
+| 3 | **Deduplicate at Bronze ingestion: apply `array_distinct()` on the split timestamps before writing** | Addresses the root cause at ingestion time. Requires Bronze schema migration. |
+| **4** | **`GROUP BY (business_id, checkin_timestamp)` + `COUNT(*)` → `checkin_count` counter column** | **Aggregation approach:** instead of discarding duplicates, fold them into a counter. Preserves the duplicate signal (count > 1 may indicate concurrent activity — see Alternative Interpretation above). No quarantine table needed. No data is discarded. The counter is useful for analytics (event frequency) and ML (feature engineering). |
 
-##### ✅ Best Logical Solution: Solution 2 — Dedup with audit trail.
+##### ✅ Best Logical Solution: Solution 4 — Aggregate with `checkin_count` counter.
 
-The RCA confirmed these are genuine source-data errors (not pipeline artifacts), so deduplication is safe and necessary. Solution 2 combines `dropDuplicates` simplicity with governance-grade traceability via a quarantine table. Long-term, Solution 3 should also be applied at the Bronze layer to prevent recurrence.
+The RCA confirmed duplicates originate from source data, but could not determine intent (source error vs. concurrent activity). Rather than discarding the signal, `GROUP BY` + `COUNT(*)` folds duplicates into a `checkin_count` column. This:
+- **Preserves full information** — no data is discarded; `SUM(checkin_count)` always equals the original exploded row count
+- **Eliminates the quarantine table** — simpler architecture, no second table to maintain
+- **Serves both interpretations** — if duplicates are errors, count=1 rows are unaffected; if they're concurrent activity, the counter captures that signal
+- **Enables downstream analytics** — `checkin_count` is directly useful as a frequency/intensity feature
 
-> **🔧 Chosen Resolution (Post-Human Review):** **Solution 2** — `dropDuplicates(["business_id", "checkin_timestamp_ISO_8601"])` at the Silver layer + log the 3,543 removed rows to a `yelp_checkin_duplicates` quarantine table for audit. Long-term: apply `array_distinct()` at Bronze ingestion.
+> **🔧 Chosen Resolution (Post-Human Review):** **Solution 4** — `GROUP BY (business_id, checkin_timestamp)` + `COUNT(*)` → `checkin_count` at the Silver Cleaned layer. Duplicates are aggregated into a counter column instead of being dropped or quarantined. The `checkin_count` column is declared `NOT NULL` in the DDL (`02_Checkin_Silver_Cleaned`). Implementation: `02_Checkin_Cleaning` notebook, Phase 2.
 
 ---
 #### 🟠 DQ-CHECKIN-006 — Near-Duplicate Checkins: Suspicious Sub-Minute Timestamps
@@ -542,6 +570,6 @@ First, cross-reference zero-span businesses against the `yelp_business` table to
 
 **Solution 1 (Add `_ingestion_timestamp` in Silver)** is the recommended primary fix — it is the industry-standard pattern for Medallion architecture pipelines and directly enables all four blocked capabilities (SLA monitoring, latency diagnostics, audit trail, incremental validation). For this PoC, **Solution 2 (Delta DESCRIBE HISTORY)** can serve as an immediate zero-change proxy until the Silver transformation is built. In production, combine Solutions 1 + 4 for full per-row and per-batch lineage.
 
-> **🔧 Chosen Resolution (Post-Human Review):** **Solution 1** — Add `_ingestion_timestamp = current_timestamp()` during the Silver-layer transformation. Use Delta `DESCRIBE HISTORY` as an interim proxy. In production, combine with `_pipeline_run_id` for full lineage.
+> **🔧 Chosen Resolution (Post-Human Review):** **Revised — No `_ingestion_timestamp` column.** Per DDL rule R6 (No Ingestion Timestamps), lineage and provenance are tracked via `TBLPROPERTIES` metadata (`pipelines.sourceTable`, `design.populationMode`) rather than a per-row timestamp column. Delta `DESCRIBE HISTORY` provides batch-level load times. In production, combine with `_pipeline_run_id` for full lineage if needed.
 
 ---
