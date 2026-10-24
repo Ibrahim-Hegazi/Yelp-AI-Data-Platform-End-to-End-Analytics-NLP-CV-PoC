@@ -16,7 +16,7 @@ This document catalogues every data quality (DQ) issue discovered during the **D
 The findings originate from notebook **4.2.1 — Business Deep EDA** and follow the standardised DQ assessment framework (Phases 6.1–6.9). The contract for every check is the Silver Cleaned business DDL (11 tables: parent `yelp_business`, 3 level-1 children and 7 parsed-dict children). Issues were first detected in the phase shown in **Detected In**; later re-detections are cross-referenced inside each issue rather than given new IDs.
 
 > **Source Notebook:** `4.2.1_Business_Deep_EDA`  
-> **Issue Range:** `DQ-BUSINESS-001` … `DQ-BUSINESS-062`
+> **Issue Range:** `DQ-BUSINESS-001` … `DQ-BUSINESS-063`
 
 ---
 
@@ -51,7 +51,9 @@ This table sits in the **Bronze Final** layer of the Yelp PoC pipeline. The tabl
 | 6b | `01_Business_Cleaning` | `yelp_poc_uc.silver_cleaned.yelp_business` + 10 child tables (data) | Silver Cleaned |
 | 7 | Gold Aggregation _(planned)_ | `yelp_poc_uc.gold` _(planned)_ | Gold |
 
-The DQ findings documented below were discovered during the Deep EDA phase (Step 5). All remediations marked as **"Chosen"** are applied during the **Bronze → Silver Cleaned** transformation (Steps 6a–6b). DDL queries create empty table structures; cleaning notebooks populate them. Rows removed during cleaning are preserved in `yelp_poc_uc.quarantine` for audit.
+The DQ findings documented below were discovered during the Deep EDA phase (Step 5). All remediations marked as **"Chosen"** are applied during the **Bronze → Silver Cleaned** transformation (Steps 6a–6b). DDL queries create empty table structures; cleaning notebooks populate them.
+
+> **🛑 Cleaning rule (human review):** no row is ever deleted because a value is NULL, `'None'`, `'{}'` or empty. The invalid value is replaced with a real SQL / Delta `NULL` and the row is kept. (The only project-wide exception is the review table, where reviews with a NULL `text` are excluded because the text is required by the ML model.) Out-of-scope businesses routed to `yelp_poc_uc.quarantine` (DQ-BUSINESS-009 / 010) are preserved there for audit.
 
 ---
 
@@ -114,22 +116,22 @@ The DQ findings documented below were discovered during the Deep EDA phase (Step
 
 | # | Solution | Justification |
 | --- | --- | --- |
-| 1 | **Normalize to SQL NULL during silver load** (`CASE WHEN trim(col) = 'None' THEN NULL`, and map inner `None` dict values to NULL booleans) | Gives the data its true meaning (unknown), restores accurate completeness metrics, and keeps "unknown" separate from `False`. This is what TE.1/TE.2 implement, with 0 lossy casts. |
+| 1 | **Normalize to SQL NULL during silver load, keeping every row** (`CASE WHEN col = 'None' THEN NULL`, applied to single-value attributes **and** to whole-dict values; inner `None` dict values become NULL booleans when the dict is decoded) | Gives the data its true meaning (unknown), restores accurate completeness metrics, and keeps "unknown" separate from `False`. No row is deleted, so row counts always reconcile with bronze. |
 | 2 | **Map `'None'` to `False`** | Simple, and boolean columns end up fully populated, but it invents information (e.g. "no delivery" when the business never answered) and biases every rate and ratio. |
 | 3 | **Keep the token and add a `_is_unknown` flag column** | Fully traceable, but it widens tables and every consumer must remember to filter on the flag. That is redundant when NULL already carries the meaning natively. |
-| 4 | **Drop the affected rows** | Removes 6.42% of businesses, along with their valid identity, location and rating data, over a minor attribute gap. Disproportionate. |
+| 4 | **Drop the affected rows** (whole businesses, or the child dict rows whose value is `'None'`) | ❌ Rejected. Violates the data-engineering rule that cleaning never deletes rows. Removing businesses loses valid identity, location and rating data; removing child dict rows breaks reconciliation with bronze. |
 
-**Best Logical Solution:** **Option 1: normalize to SQL NULL.** `'None'` is a serialization artefact, not a business value, so NULL is the only faithful representation. Matching case-sensitively on `'None'` (not lowercase `'none'`) keeps the valid `Alcohol = 'none'` category, and treating inner dict `None` as NULL keeps "unknown" apart from an explicit `False`. Downstream SQL (`AVG`, `COUNT(col)`, `LEFT JOIN`) then handles these values correctly by default.
+**Best Logical Solution:** **Option 1: normalize to SQL NULL and keep every row.** `'None'` is a serialization artefact, not a business value, so a Delta-compatible SQL `NULL` is the only faithful representation. Matching case-sensitively on `'None'` (not lowercase `'none'`) keeps the valid `Alcohol = 'none'` category, and treating inner dict `None` as NULL keeps "unknown" apart from an explicit `False`. Rows are never deleted — a whole-dict `'None'` becomes a row with `raw_dict = NULL`, not a missing row. Downstream SQL (`AVG`, `COUNT(col)`, `LEFT JOIN`) then handles these values correctly by default.
 
 ##### 🔧 Chosen Cleaning Approach (Post Human Review)
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | _TBD — pending human review_ |
+| **Chosen Solution** | **Option 1 — `'None'` → SQL NULL, no rows deleted.** Exact, case-sensitive match on `'None'`. 9,441 values in the 24 BOOLEAN + 1 INT attributes (handled in the DQ-001 cast), 184 values in the 7 enum attributes, and 3,202 whole-dict values in the 7 dict DataFrames (row kept, `raw_dict = NULL`). Total 12,827, reconciled with this document. Inner `None` dict values are converted to NULL when the dicts are decoded (DQ-BUSINESS-028). |
 | **Implementation Layer** | Silver Cleaned |
-| **Reviewer** | — |
-| **Review Date** | — |
-| **Notes** | — |
+| **Reviewer** | Ibrahim Mohamed |
+| **Review Date** | 2026-10-24 |
+| **Notes** | Human review overrode the earlier draft that removed the 3,202 whole-dict `'None'` rows from the dict DataFrames. Rule applied: **never delete a row during cleaning**; replace invalid values with NULL instead. Implemented in `01_Business_Cleaning` (DQ-BUSINESS-002 cells). |
 
 ---
 #### 🚨 DQ-BUSINESS-003 — Inconsistent Python-Repr Quoting in Enum Attributes
@@ -254,32 +256,32 @@ The DQ findings documented below were discovered during the Deep EDA phase (Step
 | **Affected Columns** | `attributes.Music` → `df_music` (69 `{}`), `attributes.BusinessParking` → `df_business_parking` (8 `{}`), `attributes.Ambience` → `df_ambience` (4 `{}` + 2 dicts whose keys are all `None`) |
 | **Total Affected Rows** | **83** out of 150,346 businesses (0.055%): 81 empty dicts + 2 all-`None` dicts. For Music this is 69 of 7,486 dict values (0.92%) |
 | **Invalid Value** | `'{}'`: syntactically a dict, but with no keys. `{'romantic': None, ...}`: every key present but unknown |
-| **Domain Rule** | Parsed-dict tables are 0:1 with `yelp_business` and should contain a row only when the business actually reported at least one flag (DDL: "only businesses with the dict") |
+| **Domain Rule** | Every business has exactly one row in each parsed-dict table (1:1 with `yelp_business`). When the dict carries no information (bronze NULL, `'None'`, `'{}'`, or every key `None`), the row is kept and **every contract key column is SQL `NULL`** (unknown). No row is deleted. |
 
-**Description:** For 81 businesses the dict attribute exists but is empty (`{}`). The business owner opened the Music, Parking or Ambience section and saved it without ticking anything. For 2 more businesses the Ambience dict lists keys whose values are all `None`. This notebook leaves both as they are:
-- **Long DataFrames (TE.2):** an empty dict has no entries, so it produces **no rows**. The business then looks the same as one that never had the attribute, although bronze tells them apart (`'{}'` vs `NULL` / `'None'`). The 2 all-`None` dicts do produce rows, all with `value = NULL`.
-- **Wide Silver DDL shape:** keeping `dict IS NOT NULL` turns all 83 into child rows where every flag is NULL. `COUNT(*)` on `yelp_business_music` would then overstate "businesses with music information" by about 0.9%, the 0:1 meaning "a row exists, so data exists" no longer holds, and `LEFT JOIN` consumers can't tell "no dict" from "empty dict".
+**Description:** For 81 businesses the dict attribute exists but is empty (`{}`). The business owner opened the Music, Parking or Ambience section and saved it without ticking anything. For 2 more businesses the Ambience dict lists keys whose values are all `None`. The same "no information" state also appears as the word `'None'` (3,202 dicts, DQ-BUSINESS-002) and as a bronze NULL (the business never had the attribute). All four mean the same thing — *unknown* — and must look the same in Silver:
+- **Long DataFrames (TE.2):** an empty dict has no entries, so it produces **no rows**. The business then disappears from the child table, which hides it instead of recording "unknown".
+- **Wide Silver DDL shape:** if only some "no information" states keep a row, `COUNT(*)` and `LEFT JOIN` results depend on how the source happened to encode "nothing".
 
 **Suggested Solutions:**
 
 | # | Solution | Justification |
 | --- | --- | --- |
-| 1 | **Treat `'{}'` as absent: exclude it from the parsed-dict child tables** (filter `trim(dict) NOT IN ('{}')` alongside the `'None'` handling) | Matches the DDL's 0:1 rule ("only businesses with the dict"). An empty dict and a missing dict carry the same information (none), and the business stays fully present in the parent and other children. |
+| 1 | **Keep one row per business in every dict table; when the dict is NULL / `'None'` / `'{}'` / all-`None`, set every contract key column to SQL `NULL`** | Follows the never-delete rule, invents nothing (NULL = unknown), and gives one consistent shape: every business × every contract key. "Has information" is simply `any key IS NOT NULL`. |
 | 2 | **Keep the row and set all flags to `False`** | Every row then has values, but it asserts "no live music, no DJ, ..." when the owner said nothing. That is invented information. |
-| 3 | **Keep all-NULL rows (current behaviour)** | Records that the section was opened, but the meaning is unclear, counts are inflated, and every consumer has to filter them. |
-| 4 | **Keep the row with an `is_empty_dict` flag** | Fully traceable, but it adds a column the DDL doesn't define (schema drift vs contract) for 83 rows of marginal analytical value. |
+| 3 | **Exclude `'{}'` / NULL dicts from the child tables** | ❌ Rejected. Deletes rows because the value is empty, which breaks the cleaning rule, and hides the business from the child table. |
+| 4 | **Keep the row with an `is_empty_dict` flag** | Fully traceable, but it adds a column the DDL doesn't define (schema drift vs contract). The all-NULL keys already carry the meaning. |
 
-**Best Logical Solution:** **Option 1: treat `'{}'` the same as a missing dict and exclude it from the level-2 tables.** It follows the DDL's 0:1 rule without changing the schema, keeps row counts meaningful (a row means at least one reported flag), and invents nothing. The fix is a one-line filter added to the TE.2 dict loop and to the Silver loading script.
+**Best Logical Solution:** **Option 1: one row per business, all contract key columns NULL when the dict has no information.** NULL is the honest value for "unknown", the row is never deleted, and every dict table has the same predictable shape. Consumers that need "businesses that reported music" filter on `any key IS NOT NULL`.
 
 ##### 🔧 Chosen Cleaning Approach (Post Human Review)
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | _TBD — pending human review_ |
+| **Chosen Solution** | **Option 1 — keep every row; NULL / `'None'` / `'{}'` / all-`None` dict → all contract key columns = SQL `NULL`** (e.g. Music: `dj`, `background_music`, `no_music`, `jukebox`, `live`, `video`, `karaoke` all NULL) |
 | **Implementation Layer** | Silver Cleaned |
-| **Reviewer** | — |
-| **Review Date** | — |
-| **Notes** | — |
+| **Reviewer** | Ibrahim Mohamed |
+| **Review Date** | 2026-10-24 |
+| **Notes** | Human review rejected the earlier AI suggestion (exclude `'{}'` from the child tables) because it deletes rows. Dict working DataFrames are built 1:1 with the parent (no `IS NOT NULL` filter). Pairs with DQ-BUSINESS-008 (missing keys → NULL) and DQ-BUSINESS-002 (`'None'` → NULL). |
 
 ---
 #### 🚨 DQ-BUSINESS-007 — Ambiguous and Cross-Midnight Opening Hours
@@ -352,19 +354,19 @@ These keys currently carry no positive signal.
 | 1 | **Pivot against the contract key list in Silver, document "absent ≡ unknown" (NULL), and use per-key denominators in reporting** | Matches the existing wide DDL, invents nothing, and states clearly that absent and `None` carry the same information (unknown). |
 | 2 | **Long format with a `key_present` flag (contract keys cross-joined, missing ones filled with NULL and flagged)** | Fully traceable at row level, but it adds rows and a column the Silver DDL doesn't define. |
 | 3 | **Fill absent keys with `False`** | Every row is complete, but it asserts "not divey" / "has music" when nothing was reported, which biases rates. |
-| 4 | **Drop dicts with partial key sets** | Removes the inconsistency, but throws away 1,942 dicts of valid reported flags. |
+| 4 | **Drop dicts with partial key sets** | ❌ Rejected. Deletes rows and throws away 1,942 dicts of valid reported flags. |
 
-**Best Logical Solution:** **Option 1: pivot against the contract key list and treat absent keys as unknown (NULL).** Absence carries no more information than `None`, the wide DDL already handles it, and per-key denominators keep the rates honest. The long DataFrames in this notebook keep the distinction for exploration.
+**Best Logical Solution:** **Option 1: standardize every dict to its full contract key list; a key that is absent becomes a column with SQL `NULL` (unknown).** Absence carries no more information than `None`, the wide DDL already handles it, and per-key denominators keep the rates honest.
 
 ##### 🔧 Chosen Cleaning Approach (Post Human Review)
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | _TBD — pending human review_ |
+| **Chosen Solution** | **Option 1 — standardize the columns.** Every dict is expanded to its full contract key list (`DICT_ATTRS`); any key missing from a business's dict gets its column with SQL `NULL`. Example: Music `{'dj': False}` → `dj = false`, `background_music` / `no_music` / `jukebox` / `live` / `video` / `karaoke` = NULL. |
 | **Implementation Layer** | Silver Cleaned |
-| **Reviewer** | — |
-| **Review Date** | — |
-| **Notes** | — |
+| **Reviewer** | Ibrahim Mohamed |
+| **Review Date** | 2026-10-24 |
+| **Notes** | No row is deleted and no `False` is invented. Pairs with DQ-BUSINESS-006 (no-information dicts → all keys NULL). |
 
 ---
 #### 🚨 DQ-BUSINESS-009 — Non-Existent State Code `XMS` (UK Business in a US/CA Dataset)
@@ -2569,10 +2571,52 @@ These rows put businesses into the wrong state for every state-level aggregate, 
 > **Re-detected existing errors (no new ID):** DQ-BUSINESS-036 (stale `is_open`: 22,496 + 5,542 open businesses silent 1–3 y / > 3 y; 130 closed businesses active in the last 30 days), DQ-BUSINESS-056 (counter drift: 279 businesses with `review_count` below and 30 above the distinct reviewers in the extract, mostly reviewed in the final weeks).
 
 ---
+#### 🚨 DQ-BUSINESS-063 — Null-Like Negative Words in Enum Attributes (`'none'`, `u'none'`, `'no'`, `u'no'`)
+
+| Attribute | Detail |
+| --- | --- |
+| **Error ID** | `DQ-BUSINESS-063` |
+| **Severity** | FINDING (NULL semantics / ambiguous meaning) |
+| **Detected In** | Human review of `01_Business_Cleaning` (DQ-BUSINESS-002 block), confirmed by a value profile of the 7 enum attributes in `bronze_final.yelp_business` |
+| **Also Confirmed In** | DQ-BUSINESS-028 check D "negation as category word" (same counts), where these words were classified as valid categories |
+| **Affected Columns** | `attributes.Alcohol` → `attr_alcohol` (`'none'` / `u'none'`: **20,910**), `attributes.WiFi` → `attr_wifi` (`'no'` / `u'no'`: **21,831**), `attributes.Smoking` → `attr_smoking` (`'no'` / `u'no'`: **2,405**), `attributes.BYOBCorkage` → `attr_byob_corkage` (`'no'` / `u'no'`: **747**). `AgesAllowed`, `NoiseLevel`, `RestaurantsAttire` have no null-like words. No free-text variants (`'no alcohol'`, `'n/a'`, `'null'`, `'unknown'`) exist in any enum |
+| **Total Affected Rows** | **45,893** enum values across 4 columns |
+| **Invalid Value** | Words that *look* like "nothing" (`none`, `no`) stored as text, next to the separate Python `None` literal (DQ-BUSINESS-002) |
+| **Domain Rule** | One meaning per value: "unknown / not answered" must be SQL `NULL`; "the business explicitly answered *no*" must be one consistent, documented category |
+
+**Description:** The enum attributes carry two different kinds of "nothing":
+- `None` (capital N, no quotes) — Python's missing value, already turned into SQL NULL by DQ-BUSINESS-002.
+- `'none'` / `'no'` (lowercase, quoted) — a category the business owner selected on the Yelp form: Alcohol = *none (no alcohol served)*, WiFi = *no WiFi*, Smoking = *not allowed*, BYOBCorkage = *BYOB not allowed*.
+
+Both look null-like to a reader, and a naive cleaner could merge them. Converting the second kind to NULL would make "the business said no" identical to "the business never answered", so a question such as "% of restaurants that serve no alcohol" could no longer be answered.
+
+**Suggested Solutions:**
+
+| # | Solution | Justification |
+| --- | --- | --- |
+| 1 | **Convert every null-like word (`'none'`, `u'none'`, `'no'`, `u'no'`) to SQL `NULL`** | One representation for "nothing". But it erases 45,893 explicit owner answers, inflates the NULL rate of these 4 columns, and makes "no" indistinguishable from "unknown". |
+| 2 | **Keep them as an explicit, standardized category** (after DQ-BUSINESS-003 unquoting: `none` / `no`), document in the column comment that they mean an explicit *no*, and keep `None` → NULL (DQ-BUSINESS-002) | No information lost, one spelling per value, and NULL keeps the single meaning "unknown". |
+| 3 | **Standardize the negative words to one shared label** (e.g. Alcohol `none` → `no`) | Consistent across columns, but changes a Yelp source category name that consumers may expect. |
+| 4 | **Keep the category and add a derived boolean** (`has_alcohol`, `has_wifi`) in Silver Enriched | Easy filtering, but adds columns outside the Silver Cleaned contract. |
+| 5 | **Split by meaning: an explicit "no" → `false`; any null-like word (`none`, `unknown`, `n/a`, `na`, `null`, `nan`, `''`, Python `None`) → SQL `NULL`** | One rule for every enum: a negative answer becomes the boolean-style value `false`, and every spelling of "nothing / unknown" becomes a real NULL. |
+
+**Best Logical Solution (AI suggestion, superseded by human review — see below):** **Option 2: keep the negative words as an explicit category and convert only the Python `None` to NULL.** These words are answers, not missing values, so converting them to NULL would lose information. *(This is an AI suggestion; the human reviewer may choose Option 1.)*
+
+##### 🔧 Chosen Cleaning Approach (Post Human Review)
+
+| Attribute | Detail |
+| --- | --- |
+| **Chosen Solution** | **Option 5 — split by meaning.** After unquoting (`u'x'` / `'x'` → `x`), a value that is exactly `no` → the text `false`; a value that is a null-like word (`none`, `unknown`, `n/a`, `na`, `null`, `nan`, empty string, case-insensitive) → SQL `NULL`. Applied to all 7 enum attributes. Expected on this snapshot: `no` → `false` in WiFi 21,831, Smoking 2,405, BYOBCorkage 747 (24,983); `none` → NULL in Alcohol 20,910. |
+| **Implementation Layer** | Silver Cleaned |
+| **Reviewer** | Ibrahim Mohamed |
+| **Review Date** | 2026-10-24 |
+| **Notes** | Human review chose Option 5 over the AI suggestion (Option 2). Matching is on the **whole value**, not a substring, so `none` is not read as containing `no`. Consequence accepted by the reviewer: `Alcohol = none` (no alcohol served) becomes NULL and can no longer be told apart from "not answered". The enum columns stay STRING in the DDL, so `false` is stored as text. No row is deleted. |
+
+---
 
 ## 4. Consolidated Error Register
 
-All **62** business data-quality errors raised in `4.2.1_Business_Deep_EDA` (next free ID: **DQ-BUSINESS-063**). Severity is copied from each issue block; the Chosen Cleaning Approach is still pending human review for every one.
+All **63** business data-quality errors (062 raised in `4.2.1_Business_Deep_EDA`, 063 raised in human review of `01_Business_Cleaning`; next free ID: **DQ-BUSINESS-064**). Severity is copied from each issue block; the Chosen Cleaning Approach is still pending human review for every one.
 
 | Error ID | Title | Severity | Phase |
 | --- | --- | --- | --- |
@@ -2638,4 +2682,49 @@ All **62** business data-quality errors raised in `4.2.1_Business_Deep_EDA` (nex
 | DQ-BUSINESS-060 | Tip Feed Halves Before the Cut-Off | MEDIUM | 6.9 |
 | DQ-BUSINESS-061 | Alberta Market Coverage Decay | MEDIUM | 6.9 |
 | DQ-BUSINESS-062 | Timestamps Are UTC Without a Time Zone | MEDIUM | 6.9 |
+| DQ-BUSINESS-063 | Null-Like Negative Words in Enum Attributes | FINDING | Human review |
+
+---
+
+## 5. Silver Cleaned Scope Classification
+
+Proposed split of the 63 issues for the cleaning notebook `01_Business_Cleaning`, based on each issue's **Best Logical Solution** (the Chosen Cleaning Approach blocks are still pending human review).
+
+* **In scope (Silver Cleaned)** — the fix is needed to meet the `01_Business_Silver_Cleaned` DDL contract (types, keys, FK, domains, NULL semantics), is deterministic, needs no external reference data and adds no new columns.
+* **Out of scope (Silver Enriched / Gold)** — the fix adds flag / derived / canonical columns, needs an external reference, changes the data model, or is an analytical caveat.
+
+### 5.1 In Scope — 23 issues
+
+| Error ID(s) | Resolution in `01_Business_Cleaning` |
+| --- | --- |
+| DQ-BUSINESS-001 / 028 | Typed cast and parse into the 11 Silver tables; native BOOLEAN for all yes/no encodings |
+| DQ-BUSINESS-002 | Case-sensitive `'None'` → NULL (keep `Alcohol = 'none'`); no rows deleted |
+| DQ-BUSINESS-003 | Regex unquote of `u'x'` / `'x'` enums + enum-domain check |
+| DQ-BUSINESS-004 / 017 / 029 | Ordered text hygiene on `name`, `address`, `city`: invisible chars, repeated spaces, dangling separators, trim |
+| DQ-BUSINESS-005 / 013 | Whitelist-protected category split, then dedupe on the composite PK |
+| DQ-BUSINESS-006 / 008 | Standardize every dict to its full contract key list (absent key → NULL column); NULL / `'None'` / `'{}'` / all-`None` dict → row kept with all key columns NULL; no rows deleted |
+| DQ-BUSINESS-009 / 010 | Quarantine 15 businesses to `quarantine.yelp_business_out_of_scope`; correct `state` for the 6 pattern-(a) rows |
+| DQ-BUSINESS-023 / 046 | Correct `state` only when the 2-of-3 witness rule is unanimous; unresolved rows deferred |
+| DQ-BUSINESS-011 | NULL the coordinates of the 1 proven geocoding error |
+| DQ-BUSINESS-014 | No change — FSA-only postal codes accepted |
+| DQ-BUSINESS-015 / 032 | `''` / `'.'` in `postal_code` and `address` → NULL |
+| DQ-BUSINESS-016 | Upper-case, truncate to valid FSA, NULL the unrecoverable |
+| DQ-BUSINESS-018 | Rule-based `city` cleanup + reviewed 7-case mapping |
+| DQ-BUSINESS-019 | Degenerate addresses → NULL |
+| DQ-BUSINESS-063 | Enum value `no` → `false`; null-like words (`none`, `unknown`, `n/a`, `null`, …) → NULL; no rows deleted |
+
+### 5.2 Out of Scope — 40 issues
+
+| Error ID(s) | Deferred To | Reason |
+| --- | --- | --- |
+| DQ-BUSINESS-007 / 012 / 025 / 033 / 047 / 048 | Silver Enriched | Derived schedule columns; raw hours kept |
+| DQ-BUSINESS-020 / 024 / 041 / 052 | Silver Enriched / Gold | Derived semantic measures (`byob_policy`, `has_music`, diet implication) |
+| DQ-BUSINESS-026 / 042 / 043 / 044 / 045 / 049 / 050 / 051 / 053 / 059 | Silver Enriched | Conflict flags — correct value not certain |
+| DQ-BUSINESS-021 / 022 / 030 / 031 / 054 / 058 | Silver Enriched | Canonical / match-key columns; display values kept |
+| DQ-BUSINESS-023 / 046 _(unresolved rows)_, 027 / 040 | Silver Enriched | Geo conflict and precision flags; external geocoder |
+| DQ-BUSINESS-034 / 035 | Silver Normalized / Analytics | Data-model change; stratified handling of missingness |
+| DQ-BUSINESS-036 / 055 / 056 / 061 | Gold | Need linked review / tip / check-in facts |
+| DQ-BUSINESS-038 / 039 | Silver Enriched | Entity resolution crosswalk, no FK rewrite |
+| DQ-BUSINESS-057 | Silver Enriched | `is_yelp_event` analytical filter |
+| DQ-BUSINESS-037 / 060 / 062 | Documentation | No row-level transformation in the business table |
 
