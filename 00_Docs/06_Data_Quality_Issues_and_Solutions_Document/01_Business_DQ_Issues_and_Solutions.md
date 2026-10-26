@@ -164,11 +164,11 @@ The DQ findings documented below were discovered during the Deep EDA phase (Step
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | _TBD — pending human review_ |
+| **Chosen Solution** | **Option 1 — anchored regex unquote (`^u?'(.*)'$` → `$1`) on the 7 enum columns, then a fail-fast domain check against the Silver DDL column comments, then multi-word values written together are split with `_` (human review): `18plus` → `18_plus`, `21plus` → `21_plus`, `allages` → `all_ages`.** 183,307 values unquoted (27,610 businesses had a `'x'` spelling); 0 lost, 0 out of domain; no rows deleted. |
 | **Implementation Layer** | Silver Cleaned |
-| **Reviewer** | — |
-| **Review Date** | — |
-| **Notes** | — |
+| **Reviewer** | Ibrahim Mohamed |
+| **Review Date** | 2026-10-24 |
+| **Notes** | Implemented in `01_Business_Cleaning` (DQ-BUSINESS-003 cells). Lowercase `none` / `no` are kept by this step and then handled by DQ-BUSINESS-063 (`no` → `false`, `none` → NULL). |
 
 ---
 #### 🚨 DQ-BUSINESS-004 — Leading/Trailing Whitespace in Identity Text Fields
@@ -277,7 +277,7 @@ The DQ findings documented below were discovered during the Deep EDA phase (Step
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | **Option 1 — keep every row; NULL / `'None'` / `'{}'` / all-`None` dict → all contract key columns = SQL `NULL`** (e.g. Music: `dj`, `background_music`, `no_music`, `jukebox`, `live`, `video`, `karaoke` all NULL) |
+| **Chosen Solution** | **Option 1, LONG form — every dict DataFrame becomes `(business_id, key, value)`; keys cleaned with regex `^u?'\|'$` (`u'casual'` / `'casual'` → `casual`); NULL / `'None'` / `'{}'` / all-`None` dict → one row for EVERY contract key with `value` = SQL `NULL`** (e.g. Ambience `{}` → 9 rows `casual`, `classy`, … all NULL). Human review 2026-10-24 replaced the earlier wide one-column-per-key shape |
 | **Implementation Layer** | Silver Cleaned |
 | **Reviewer** | Ibrahim Mohamed |
 | **Review Date** | 2026-10-24 |
@@ -362,7 +362,7 @@ These keys currently carry no positive signal.
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | **Option 1 — standardize the columns.** Every dict is expanded to its full contract key list (`DICT_ATTRS`); any key missing from a business's dict gets its column with SQL `NULL`. Example: Music `{'dj': False}` → `dj = false`, `background_music` / `no_music` / `jukebox` / `live` / `video` / `karaoke` = NULL. |
+| **Chosen Solution** | **Option 1, LONG form — fill missing keys with NULL rows.** Every business × every contract key (`DICT_ATTRS`) LEFT JOIN the existing long rows; a key missing from the dict gets the row `(business_id, missing_key, NULL)`. Example: Music `{'dj': False}` → 7 rows: `dj = false`, `background_music` / `no_music` / `jukebox` / `live` / `video` / `karaoke` = NULL. Result: 150,346 × keys rows per dict table (1,940 businesses completed with 3,889 NULL rows). Note: Silver DDL dict tables are still wide — pivot at write time or change the DDL to long. |
 | **Implementation Layer** | Silver Cleaned |
 | **Reviewer** | Ibrahim Mohamed |
 | **Review Date** | 2026-10-24 |
@@ -399,11 +399,11 @@ These keys currently carry no positive signal.
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | _TBD — pending human review_ |
-| **Implementation Layer** | Silver Cleaned |
-| **Reviewer** | — |
-| **Review Date** | — |
-| **Notes** | — |
+| **Chosen Solution** | **Option 1 — move to quarantine.** `Pumpernickles Catering` is written to `quarantine.yelp_business_out_of_scope` with reason `NON_EXISTENT_STATE` and removed from `df_business` **and from all 10 child DataFrames** (attributes, hours, categories, 7 dict tables), so no orphan child row remains. Its reviews / tips / check-ins are quarantined too (see section 6). |
+| **Implementation Layer** | Silver Cleaned — `01_Business_Cleaning` · MS-01.4 · state (Fix + downstream orphans); written in the final write step (FW-02) |
+| **Reviewer** | Ibrahim Mohamed |
+| **Review Date** | 2026-10-25 |
+| **Notes** | Approved exception to rule R-1 (never delete a row): nothing is lost, the full record (cleaned business columns + raw bronze attributes / hours / categories) and a detailed `reason_detail` are kept in quarantine, so the business can be restored. |
 
 ---
 #### 🚨 DQ-BUSINESS-010 — Real State Codes Outside the Yelp Footprint (Mislabeled or Out-of-Scope Businesses)
@@ -444,11 +444,11 @@ Left as-is, pattern (a) assigns businesses to the wrong state in every state-lev
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | _TBD — pending human review_ |
-| **Implementation Layer** | Silver Cleaned |
-| **Reviewer** | — |
-| **Review Date** | — |
-| **Notes** | — |
+| **Chosen Solution** | **Option 1.** **(a) 6 businesses:** `state` corrected from the ZIP witness when the coordinates lie in the same state's data-derived box (SD→FL, HI→AZ, UT→ID, 2× TX→TN, MA→PA). **(b) 13 + (c) 1 businesses:** moved to `quarantine.yelp_business_out_of_scope` with reasons `ADDRESS_COORD_CONFLICT` / `OUT_OF_FOOTPRINT`, removed from `df_business` and from all 10 child DataFrames; their reviews / tips / check-ins are quarantined too (see section 6). |
+| **Implementation Layer** | Silver Cleaned — `01_Business_Cleaning` · MS-01.4 · state (Detect / Fix / Verify + downstream orphans); written in the final write step (FW-02) |
+| **Reviewer** | Ibrahim Mohamed |
+| **Review Date** | 2026-10-25 |
+| **Notes** | 21 businesses outside the footprint at MS-01.4 time (6 a + 13 b + 1 c + 1 XMS). Approved exception to rule R-1: the 15 quarantined businesses leave every working DataFrame together with their child rows (15 rows per one-row child table, 70 category rows). Each quarantine row keeps the full record, the raw bronze child data, the evidence (`zip_state`, `coords_in_states`) and a long plain-text `reason_detail`. All 43 MS-01.4 verification checks PASS. |
 
 ---
 #### 🚨 DQ-BUSINESS-011 — Coordinates Outside Every Yelp Metro (Geocoding Error)
@@ -599,11 +599,11 @@ Left as-is, pattern (a) assigns businesses to the wrong state in every state-lev
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | _TBD — pending human review_ |
-| **Implementation Layer** | Silver Cleaned |
-| **Reviewer** | — |
-| **Review Date** | — |
-| **Notes** | — |
+| **Chosen Solution** | **Option 1 — keep the FSA.** The 196 FSA-only codes stay unchanged; the Canadian pattern accepts `A1A 1A1` or `A1A` (strict letters: no `D F I O Q U`, no `W Z` as first letter). |
+| **Implementation Layer** | Silver Cleaned — `01_Business_Cleaning` · MS-01.5 (`postal_code`) |
+| **Reviewer** | Ibrahim Mohamed (reviewed MS-01.5; no change requested for FSA-only codes) |
+| **Review Date** | 2026-10-26 |
+| **Notes** | Verified: FSA-only count 196 before and after the Fix. Invalid codes are **not** truncated to an FSA (see DQ-BUSINESS-016). |
 
 ---
 #### 🚨 DQ-BUSINESS-015 — Empty-String Postal Codes (Masked NULL)
@@ -636,11 +636,11 @@ Left as-is, pattern (a) assigns businesses to the wrong state in every state-lev
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | _TBD — pending human review_ |
-| **Implementation Layer** | Silver Cleaned |
-| **Reviewer** | — |
-| **Review Date** | — |
-| **Notes** | — |
+| **Chosen Solution** | **Option 1 — `''` → SQL NULL.** The 73 empty codes become NULL; the business rows are kept. |
+| **Implementation Layer** | Silver Cleaned — `01_Business_Cleaning` · MS-01.5 (`postal_code`) |
+| **Reviewer** | Ibrahim Mohamed (reviewed MS-01.5; no change requested for empty codes) |
+| **Review Date** | 2026-10-26 |
+| **Notes** | None of the 73 belongs to the 15 businesses quarantined in MS-01.4. Verified: 0 empty strings left; SQL NULL postal codes = 73 + 3 invalid (DQ-BUSINESS-016) = 76. |
 
 ---
 #### 🚨 DQ-BUSINESS-016 — Malformed Postal Codes (Typos in US / Canadian Codes)
@@ -678,11 +678,11 @@ They fail any strict pattern constraint and won't join to a postal reference tab
 
 | Attribute | Detail |
 | --- | --- |
-| **Chosen Solution** | _TBD — pending human review_ |
-| **Implementation Layer** | Silver Cleaned |
-| **Reviewer** | — |
-| **Review Date** | — |
-| **Notes** | — |
+| **Chosen Solution** | **Different from the suggestion: upper-case the case-only error; every other invalid code → SQL NULL (no truncation, no repair, no quarantine).** `T6x 2H4` → `T6X 2H4`. `T6T 0G`, `T8A 5WA` and `336140` → SQL NULL in `silver_cleaned.yelp_business`; the business rows are kept. The original values remain in `bronze_final.yelp_business`. |
+| **Implementation Layer** | Silver Cleaned — `01_Business_Cleaning` · MS-01.5 (`postal_code`) |
+| **Reviewer** | Ibrahim Mohamed |
+| **Review Date** | 2026-10-26 |
+| **Notes** | Why not truncate / repair: the readable part may itself hold the typo, and the dataset gives competing candidates. Evidence from the dataset (valid codes of businesses within 300 m, not used to fill): `T6T 0G` → `T6T 0G9` (3, 118 m) and `T6T 0G6` (1, 48 m), two candidates; `T8A 5WA` → character 6 is a letter where a digit is required, so no real code has this form; `T8A 5W9` used by 6 units of the same complex (51 m) but `T8A 0Z6` also at the same address; `336140` → the 2 businesses at the same street number and all 18 within 300 m use `33647`, so dropping the last digit (`33614`, a real Tampa ZIP suggested by a web lookup) would be wrong. A web lookup confirmed `T6X 2H4` is Edmonton. Verified in MS-01.5 · Verify: 0 invalid codes left, the 3 businesses kept with `postal_code` = NULL. |
 
 ---
 #### 🚨 DQ-BUSINESS-017 — Invisible Unicode Characters (Zero-Width Space / NBSP) in Name, Address and City
@@ -2708,7 +2708,7 @@ Proposed split of the 63 issues for the cleaning notebook `01_Business_Cleaning`
 | DQ-BUSINESS-011 | NULL the coordinates of the 1 proven geocoding error |
 | DQ-BUSINESS-014 | No change — FSA-only postal codes accepted |
 | DQ-BUSINESS-015 / 032 | `''` / `'.'` in `postal_code` and `address` → NULL |
-| DQ-BUSINESS-016 | Upper-case, truncate to valid FSA, NULL the unrecoverable |
+| DQ-BUSINESS-016 | Upper-case the case-only error; other invalid codes → NULL (business row kept, no quarantine) |
 | DQ-BUSINESS-018 | Rule-based `city` cleanup + reviewed 7-case mapping |
 | DQ-BUSINESS-019 | Degenerate addresses → NULL |
 | DQ-BUSINESS-063 | Enum value `no` → `false`; null-like words (`none`, `unknown`, `n/a`, `null`, …) → NULL; no rows deleted |
@@ -2727,4 +2727,46 @@ Proposed split of the 63 issues for the cleaning notebook `01_Business_Cleaning`
 | DQ-BUSINESS-038 / 039 | Silver Enriched | Entity resolution crosswalk, no FK rewrite |
 | DQ-BUSINESS-057 | Silver Enriched | `is_yelp_event` analytical filter |
 | DQ-BUSINESS-037 / 060 / 062 | Documentation | No row-level transformation in the business table |
+
+## 6. Quarantine of Out-of-Scope Businesses and Their Dependent Rows (DQ-BUSINESS-009 / 010)
+
+Decision by Ibrahim Mohamed, 2026-10-25. Implemented in `01_Business_Cleaning` (MS-01.4) and enforced again in `02_Checkin_Cleaning` (Phase 2.5) and `03_Review_Cleaning` (Phase 4.5).
+
+### 6.1 What leaves Silver and where it goes
+
+| Rows | Count | Removed from | Kept in |
+| --- | ---: | --- | --- |
+| Businesses (b 13, c 1, XMS 1) | 15 | `df_business` → `silver_cleaned.yelp_business` | `quarantine.yelp_business_out_of_scope` |
+| Child rows of those businesses | 15 per one-row child table, 70 category rows | the 10 child DataFrames → 10 Silver child tables | raw bronze attributes / hours / categories on the business quarantine row (`bronze_*` columns) and counts in `child_rows_removed` |
+| Reviews | 199 | `silver_cleaned.yelp_review` | `quarantine.yelp_review_orphan_business` |
+| Check-ins (one row per visit) | 99 (from 11 bronze rows) | `silver_cleaned.yelp_checkin` | `quarantine.yelp_checkin_orphan_business` |
+| Tips | 6 | future `silver_cleaned.yelp_tip` | `quarantine.yelp_tip_orphan_business` |
+
+### 6.2 Quarantine row content
+
+| Table | Columns |
+| --- | --- |
+| `yelp_business_out_of_scope` | `quarantine_reason` (`ADDRESS_COORD_CONFLICT` / `OUT_OF_FOOTPRINT` / `NON_EXISTENT_STATE`), `dq_issue`, `pattern`, `reason_detail` (full plain-text explanation built from the record), `note`, `zip_state`, `coords_in_states`, `child_rows_removed` (JSON) + total, `downstream_reviews` / `_tips` / `_checkins`, the full business record, `bronze_attributes_json`, `bronze_hours_json`, `bronze_categories`, `action = MOVED_TO_QUARANTINE`, `detected_in`, `quarantined_at` |
+| `yelp_review_orphan_business`, `yelp_checkin_orphan_business`, `yelp_tip_orphan_business` | all source columns unchanged + `quarantine_reason` (`PARENT_BUSINESS_QUARANTINED` or `BUSINESS_NOT_IN_SILVER`), `reason_detail`, `dq_issue`, `parent_business_name`, `parent_quarantine_reason`, `parent_dq_issue`, `parent_pattern`, `parent_evidence`, `source_table`, `detected_in`, `action`, `quarantined_at` |
+
+### 6.3 Final write step of `01_Business_Cleaning`
+
+The only part of the notebook that writes to Unity Catalog; it sits after the empty separator cells at the end of the notebook.
+
+| Cell | Writes? | What it does |
+| --- | --- | --- |
+| FW-01 Pre-write gate | No | Per Silver table: table exists (DDL applied), no missing / extra columns, every column already has the target type, PK unique and not NULL, no quarantined business, no orphan child row. Per quarantine table: reason and `reason_detail` filled, every row belongs to a moved business. Per Silver review / check-in / tip table: rows to delete = rows captured in quarantine. Sets `FINAL_WRITE_GATE_PASSED`. |
+| FW-02 Write | **Yes** | Step 1: write the 4 quarantine tables (first, so nothing is deleted before it is stored). Step 2: `DELETE` the rows of the quarantined businesses from `silver_cleaned.yelp_review` / `yelp_checkin` (/ `yelp_tip` once built); deleted = planned. Step 3: `INSERT OVERWRITE` the 11 Silver business tables (atomic, keeps the DDL schema and constraints). Refuses to run unless the gate passed. Re-run safe: an empty downstream DataFrame never replaces stored quarantine rows. |
+| FW-03 Post-write verification | No | Reads the tables back: row counts, no quarantined business left anywhere in Silver, FK integrity of every child / review / check-in / tip row, quarantine tables complete, bronze businesses = Silver + quarantined businesses. |
+
+### 6.4 Downstream notebooks (business FK check)
+
+| Notebook | Step | Rule |
+| --- | --- | --- |
+| `03_Review_Cleaning` | Phase 4.5 (DQ-REVIEW-028) | reviews whose `business_id` is not in `silver_cleaned.yelp_business` → `quarantine.yelp_review_orphan_business`; Phase 6 reconciles bronze = Silver + all quarantine tables and asserts 0 orphan reviews |
+| `02_Checkin_Cleaning` | Phase 2.5 (DQ-CHECKIN-014) | aggregated check-ins whose `business_id` is not in `silver_cleaned.yelp_business` → `quarantine.yelp_checkin_orphan_business`; Phase 4 reconciles `sum(checkin_count)` = exploded events − quarantined events and asserts 0 orphan check-ins |
+| Tip notebook (not built yet) | — | must apply the same check before writing `silver_cleaned.yelp_tip` |
+
+**Run order:** `01_Business_Silver_Cleaned` (DDL) → `01_Business_Cleaning` (all steps, then FW-01 → FW-03) → `02_Checkin_Cleaning` and `03_Review_Cleaning`. The downstream checks read the current `silver_cleaned.yelp_business`; they find the orphans only after the business final write.
+
 

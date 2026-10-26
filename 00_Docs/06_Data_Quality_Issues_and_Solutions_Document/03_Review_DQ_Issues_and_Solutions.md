@@ -1130,5 +1130,40 @@ Use **Solutions 1 + 2** as the primary fix: add a row-level ingestion timestamp 
 | **Review Date** | — |
 | **Notes** | — |
 
+---
+
+#### 🟠 DQ-REVIEW-028 — Reviews of Quarantined Businesses (Orphan Business FK)
+
+| Attribute | Detail |
+| --- | --- |
+| **Error ID** | `DQ-REVIEW-028` |
+| **Description** | `01_Business_Cleaning` (MS-01.4, DQ-BUSINESS-009 / 010) moves **15 out-of-scope businesses** to `quarantine.yelp_business_out_of_scope` (13 `ADDRESS_COORD_CONFLICT`, 1 `OUT_OF_FOOTPRINT`, 1 `NON_EXISTENT_STATE`); they are not written to `silver_cleaned.yelp_business`. **199 reviews** belong to these businesses. Left in Silver, their `business_id` has no parent row. |
+| **Detection Phase** | Cross-table FK check review.business_id → silver_cleaned.yelp_business.business_id, triggered by the business quarantine decision (2026-10-25) |
+| **Detected In** | `01_Business_Cleaning` · MS-01.4 · state · Fix / Verify — downstream orphans |
+| **Severity** | 🟠 **Medium** — 199 rows (0.003 %), but every one is an FK violation and counts stars / reviews for a business whose location cannot be trusted or lies outside the dataset |
+| **Affected Records** | 199 reviews of 15 businesses, e.g. `IHOP` (Boone NC, 29), `Cosmetic Solutions` (Lula Lula HI, 19), `2400 Briarwest` (Houston TX, 13), `Breeze Ski Rentals` (Dumont CO, 11), `Mr Brakes` (Roseville MI, 11) |
+| **Root Cause** | Not a review defect: the parent business is quarantined because its address, ZIP and coordinates contradict each other or lie outside the 14 footprint states. |
+| **Impact** | INNER JOINs to business silently drop the rows; LEFT JOINs return NULL business attributes; business-level review aggregates include businesses that are not in Silver. |
+
+##### Suggested Solutions
+
+| # | Solution | Justification |
+| --- | --- | --- |
+| 1 | **Quarantine the reviews with their parent's reason** and remove them from Silver | Keeps FK integrity; every review is kept unchanged and can be restored with its business |
+| 2 | Keep the reviews and flag `is_orphan_business` | Keeps the text for NLP, but breaks the FK and mixes out-of-scope businesses into business-level analytics |
+| 3 | Keep the reviews and point them to a stub business | Satisfies the FK artificially; invents a business row |
+
+##### ✅ Best Logical Solution: Solution 1 (quarantine with the parent's reason).
+
+##### 🔧 Chosen Cleaning Approach (Post Human Review)
+
+| Attribute | Detail |
+| --- | --- |
+| **Chosen Solution** | **Solution 1 — quarantine to `yelp_poc_uc.quarantine.yelp_review_orphan_business`.** `03_Review_Cleaning` · Phase 4.5 quarantines every review whose `business_id` is not in `silver_cleaned.yelp_business` (reason `PARENT_BUSINESS_QUARANTINED` when the business is in the business quarantine table, otherwise `BUSINESS_NOT_IN_SILVER`), with a detailed `reason_detail` and the parent's reason / DQ issue / pattern / evidence. The final write of `01_Business_Cleaning` writes the same table and deletes the 199 rows from the existing `silver_cleaned.yelp_review`. Phase 6 reconciles bronze = Silver + null-text + ID-collision + orphan-user + orphan-business quarantine, and asserts 0 reviews without a parent business. |
+| **Implementation Layer** | Silver |
+| **Reviewer** | Ibrahim Mohamed |
+| **Review Date** | 2026-10-25 |
+| **Notes** | Run this notebook after the final write of `01_Business_Cleaning`; the check reads the current `silver_cleaned.yelp_business`. See `01_Business_DQ_Issues_and_Solutions.md` section 6. |
+
 
 ---

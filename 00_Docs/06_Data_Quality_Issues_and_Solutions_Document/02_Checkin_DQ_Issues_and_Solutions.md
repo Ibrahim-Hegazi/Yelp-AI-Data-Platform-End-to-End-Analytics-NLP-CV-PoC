@@ -573,3 +573,28 @@ First, cross-reference zero-span businesses against the `yelp_business` table to
 > **🔧 Chosen Resolution (Post-Human Review):** **Revised — No `_ingestion_timestamp` column.** Per DDL rule R6 (No Ingestion Timestamps), lineage and provenance are tracked via `TBLPROPERTIES` metadata (`pipelines.sourceTable`, `design.populationMode`) rather than a per-row timestamp column. Delta `DESCRIBE HISTORY` provides batch-level load times. In production, combine with `_pipeline_run_id` for full lineage if needed.
 
 ---
+
+#### 🟠 DQ-CHECKIN-014 — Check-ins of Quarantined Businesses (Orphan Business FK)
+
+| Attribute | Detail |
+| --- | --- |
+| **Error ID** | `DQ-CHECKIN-014` |
+| **Description** | `01_Business_Cleaning` (MS-01.4, DQ-BUSINESS-009 / 010) moves **15 out-of-scope businesses** to `quarantine.yelp_business_out_of_scope`; they are not written to `silver_cleaned.yelp_business`. **11 of them have check-ins**: 11 bronze rows that become **99 Silver rows** (one per `business_id`, `checkin_timestamp`) after explode and aggregation. Left in Silver, their `business_id` has no parent row. |
+| **Detection Phase** | Cross-table FK check checkin.business_id → silver_cleaned.yelp_business.business_id, triggered by the business quarantine decision (2026-10-25) |
+| **Detected In** | `01_Business_Cleaning` · MS-01.4 · state · Fix / Verify — downstream orphans |
+| **Severity** | 🟠 **Medium** — 99 of 13,353,332 rows, but every one is an FK violation and counts visits for a business whose location cannot be trusted or lies outside the dataset |
+| **Root Cause** | Not a check-in defect: the parent business is quarantined because its address, ZIP and coordinates contradict each other or lie outside the 14 footprint states. |
+| **Impact** | INNER JOINs to business silently drop the rows; business-level visit counts include businesses that are not in Silver. |
+
+##### 💡 Suggested Solutions
+
+| # | Solution | Justification |
+| --- | --- | --- |
+| 1 | **Quarantine the check-ins with their parent's reason** and remove them from Silver | Keeps FK integrity; every row is kept unchanged and can be restored with its business |
+| 2 | Keep the check-ins and flag `is_orphan_business` | Breaks the FK and mixes out-of-scope businesses into visit analytics |
+
+##### ✅ Best Logical Solution: Solution 1 (quarantine with the parent's reason).
+
+> **🔧 Chosen Resolution (Post-Human Review, Ibrahim Mohamed, 2026-10-25):** **Solution 1 — quarantine to `yelp_poc_uc.quarantine.yelp_checkin_orphan_business`.** `02_Checkin_Cleaning` · Phase 2.5 quarantines every aggregated check-in row whose `business_id` is not in `silver_cleaned.yelp_business` (reason `PARENT_BUSINESS_QUARANTINED` or `BUSINESS_NOT_IN_SILVER`), with a detailed `reason_detail` and the parent's reason / DQ issue / pattern / evidence. The final write of `01_Business_Cleaning` writes the same table and deletes the 99 rows from the existing `silver_cleaned.yelp_checkin`. Phase 4 reconciles `sum(checkin_count)` = exploded events − quarantined events and asserts 0 check-ins without a parent business. Run this notebook after the final write of `01_Business_Cleaning`. See `01_Business_DQ_Issues_and_Solutions.md` section 6.
+
+---
